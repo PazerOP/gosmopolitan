@@ -2541,7 +2541,8 @@ func prefixof(ctxt *obj.Link, a *obj.Addr) int {
 			default:
 				log.Fatalf("unknown TLS base register for %v", ctxt.Headtype)
 
-			case objabi.Hlinux:
+			case objabi.Hcosmo,
+				objabi.Hlinux:
 				if isAndroid {
 					return 0x64 // FS
 				}

@@ -13,7 +13,6 @@ package syscall
 
 import (
 	"internal/runtime/syscall/cosmo"
-	"runtime"
 	"unsafe"
 )
 
@@ -302,10 +301,6 @@ func Wait4(pid int, wstatus *WaitStatus, options int, rusage *Rusage) (wpid int,
 //sys	Fchownat(dirfd int, path string, uid int, gid int, flags int) (err error)
 //sys	Renameat(olddirfd int, oldpath string, newdirfd int, newpath string) (err error)
 
-func Sendfile(outfd int, infd int, offset *int64, count int) (written int, err error) {
-	return sendfile(outfd, infd, offset, count)
-}
-
 //sys	sendfile(outfd int, infd int, offset *int64, count int) (written int, err error)
 //sys	Fstatfs(fd int, buf *Statfs_t) (err error)
 //sys	Statfs(path string, buf *Statfs_t) (err error)
@@ -316,8 +311,6 @@ const (
 	_AT_REMOVEDIR        = 0x200
 	_AT_SYMLINK_NOFOLLOW = 0x100
 	_AT_EACCESS          = 0x200
-	O_LARGEFILE          = 0
-	PathMax              = 4096
 )
 
 //sys	fstat(fd int, stat *Stat_t) (err error)
@@ -479,35 +472,41 @@ func Getsockname(fd int) (sa Sockaddr, err error) {
 	return anyToSockaddr(&rsa)
 }
 
-func Getpeername(fd int) (sa Sockaddr, err error) {
-	var rsa RawSockaddrAny
-	var len _Socklen = SizeofSockaddrAny
-	if err = getpeername(fd, &rsa, &len); err != nil {
-		return
+//sys	fcntl(fd int, cmd int, arg int) (val int, err error)
+
+func direntIno(buf []byte) (uint64, bool) {
+	return readInt(buf, unsafe.Offsetof(Dirent{}.Ino), unsafe.Sizeof(Dirent{}.Ino))
+}
+
+func direntReclen(buf []byte) (uint64, bool) {
+	return readInt(buf, unsafe.Offsetof(Dirent{}.Reclen), unsafe.Sizeof(Dirent{}.Reclen))
+}
+
+func direntNamlen(buf []byte) (uint64, bool) {
+	reclen, ok := direntReclen(buf)
+	if !ok {
+		return 0, false
 	}
-	return anyToSockaddr(&rsa)
+	return reclen - uint64(unsafe.Offsetof(Dirent{}.Name)), true
 }
 
-func Bind(fd int, sa Sockaddr) (err error) {
-	ptr, n, err := sa.sockaddr()
-	if err != nil {
-		return err
-	}
-	return bind(fd, ptr, n)
+//sys	getrlimit(resource int, rlim *Rlimit) (err error) = SYS_GETRLIMIT
+//sys	prlimit(pid int, resource int, newlimit *Rlimit, old *Rlimit) (err error) = SYS_PRLIMIT64
+
+func Getrlimit(resource int, rlim *Rlimit) (err error) {
+	return prlimit(0, resource, nil, rlim)
 }
 
-func Connect(fd int, sa Sockaddr) (err error) {
-	ptr, n, err := sa.sockaddr()
-	if err != nil {
-		return err
-	}
-	return connect(fd, ptr, n)
+// setrlimit sets a resource limit.
+func setrlimit(resource int, rlim *Rlimit) (err error) {
+	return prlimit(0, resource, rlim, nil)
 }
 
-func Listen(s int, backlog int) (err error) {
-	return listen(s, backlog)
+func ReadDirent(fd int, buf []byte) (n int, err error) {
+	return Getdents(fd, buf)
 }
 
-func Shutdown(fd int, how int) (err error) {
-	return shutdown(fd, how)
+func Shutdown(s int, how int) (err error) {
+	return shutdown(s, how)
 }
+

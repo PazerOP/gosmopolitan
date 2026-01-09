@@ -310,7 +310,8 @@ TEXT runtime·sigreturn__sigaction(SB),NOSPLIT,$0
 	SYSCALL
 	INT $3	// not reached
 
-TEXT runtime·sysMmap(SB),NOSPLIT,$0
+// func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) (p unsafe.Pointer, err int)
+TEXT runtime·mmap(SB),NOSPLIT,$0
 	MOVQ	addr+0(FP), DI
 	MOVQ	n+8(FP), SI
 	MOVL	prot+16(FP), DX
@@ -321,18 +322,19 @@ TEXT runtime·sysMmap(SB),NOSPLIT,$0
 	MOVL	$SYS_mmap, AX
 	SYSCALL
 	CMPQ	AX, $0xfffffffffffff001
-	JLS	ok
+	JLS	mmap_ok
 	NOTQ	AX
 	INCQ	AX
 	MOVQ	$0, p+32(FP)
 	MOVQ	AX, err+40(FP)
 	RET
-ok:
+mmap_ok:
 	MOVQ	AX, p+32(FP)
 	MOVQ	$0, err+40(FP)
 	RET
 
-TEXT runtime·sysMunmap(SB),NOSPLIT,$0
+// func munmap(addr unsafe.Pointer, n uintptr)
+TEXT runtime·munmap(SB),NOSPLIT,$0
 	MOVQ	addr+0(FP), DI
 	MOVQ	n+8(FP), SI
 	MOVQ	$SYS_munmap, AX
@@ -340,6 +342,18 @@ TEXT runtime·sysMunmap(SB),NOSPLIT,$0
 	CMPQ	AX, $0xfffffffffffff001
 	JLS	2(PC)
 	MOVL	$0xf1, 0xf1  // crash
+	RET
+
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB),NOSPLIT,$16-12
+	MOVL	$0, DI // CLOCK_REALTIME
+	LEAQ	0(SP), SI
+	MOVQ	$SYS_clock_gettime, AX
+	SYSCALL
+	MOVQ	0(SP), AX	// sec
+	MOVQ	8(SP), DX	// nsec
+	MOVQ	AX, sec+0(FP)
+	MOVL	DX, nsec+8(FP)
 	RET
 
 TEXT runtime·madvise(SB),NOSPLIT,$0

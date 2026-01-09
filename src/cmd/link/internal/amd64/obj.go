@@ -102,7 +102,8 @@ func archinit(ctxt *ld.Link) {
 			*ld.FlagTextAddr = ld.Rnd(0x1000000, *ld.FlagRound) + int64(ld.HEADR)
 		}
 
-	case objabi.Hlinux, /* elf64 executable */
+	case objabi.Hcosmo, /* cosmopolitan */
+		objabi.Hlinux, /* elf64 executable */
 		objabi.Hfreebsd,   /* freebsd */
 		objabi.Hnetbsd,    /* netbsd */
 		objabi.Hopenbsd,   /* openbsd */

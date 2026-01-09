@@ -137,6 +137,8 @@ const (
 	SO_SNDTIMEO   = 0x15
 	SO_TYPE       = 0x3
 
+	SCM_RIGHTS = 0x1
+
 	S_IEXEC  = 0x40
 	S_IFBLK  = 0x6000
 	S_IFCHR  = 0x2000
@@ -165,6 +167,9 @@ const (
 	S_IXUSR  = 0x40
 
 	TCP_NODELAY = 0x1
+
+	TIOCNOTTY = 0x5422
+	TIOCSCTTY = 0x540e
 
 	WNOHANG    = 0x1
 	WUNTRACED  = 0x2
