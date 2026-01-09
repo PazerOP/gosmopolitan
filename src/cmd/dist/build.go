@@ -103,6 +103,7 @@ var okgoos = []string{
 	"plan9",
 	"windows",
 	"aix",
+	"cosmo",
 }
 
 // xinit handles initialization of the various global state, like goroot and goarch.

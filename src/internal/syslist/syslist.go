@@ -17,6 +17,7 @@ package syslist
 var KnownOS = map[string]bool{
 	"aix":       true,
 	"android":   true,
+	"cosmo":     true,
 	"darwin":    true,
 	"dragonfly": true,
 	"freebsd":   true,
@@ -41,6 +42,7 @@ var KnownOS = map[string]bool{
 var UnixOS = map[string]bool{
 	"aix":       true,
 	"android":   true,
+	"cosmo":     true,
 	"darwin":    true,
 	"dragonfly": true,
 	"freebsd":   true,
