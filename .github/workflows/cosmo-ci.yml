@@ -7,8 +7,6 @@ name: Cosmopolitan Cross-Platform CI
 on:
   push:
     branches: [ "claude/*", "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
