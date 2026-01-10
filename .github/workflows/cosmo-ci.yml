@@ -7,6 +7,8 @@ name: Cosmopolitan Cross-Platform CI
 on:
   push:
     branches: [ "claude/*", "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -16,9 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         build-os: [ubuntu-latest, macos-latest, windows-latest]
-    
+
     runs-on: ${{ matrix.build-os }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,6 +47,41 @@ jobs:
           make.bat
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
+
+      # Shebang support tests (Unix only - shebang is a Unix feature)
+      - name: Test shebang support - unit tests
+        if: runner.os != 'Windows'
+        run: |
+          export PATH="$PWD/bin:$PATH"
+          echo "=== Running shebang unit tests ==="
+          go test ./src/go/scanner/... -run TestShebang -v
+          go test ./src/go/build/... -run TestReadGoInfo -v
+          go test ./src/cmd/compile/internal/syntax/... -run TestShebang -v
+
+      - name: Test shebang support - script execution
+        if: runner.os != 'Windows'
+        run: |
+          export PATH="$PWD/bin:$PATH"
+
+          # Create a Go script with shebang
+          cat > /tmp/shebang-test.go << 'EOF'
+          #!/usr/bin/env go run
+
+          package main
+
+          import "fmt"
+
+          func main() {
+              fmt.Println("Hello from shebang Go script!")
+          }
+          EOF
+
+          echo "=== Testing go run with shebang file ==="
+          go run /tmp/shebang-test.go
+
+          echo "=== Testing direct script execution ==="
+          chmod +x /tmp/shebang-test.go
+          /tmp/shebang-test.go
 
       - name: Create test program
         shell: bash
@@ -119,7 +156,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Check test results
         run: |
@@ -129,3 +166,6 @@ jobs:
           echo "Test Platforms:  ubuntu-latest, windows-latest"
           echo ""
           echo "Matrix: 3 builds x 2 test platforms = 6 combinations"
+          echo ""
+          echo "Additional tests run during build:"
+          echo "  - Shebang support (Unix only)"
