@@ -488,6 +488,8 @@ func Main(arch *sys.Arch, theArch Arch) {
 	ctxt.Bso.Flush()
 	bench.Start("archive")
 	ctxt.archive()
+	bench.Start("ape")
+	ctxt.convertToAPE()
 	bench.Report(os.Stdout)
 
 	errorexit()

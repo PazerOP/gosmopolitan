@@ -1,0 +1,131 @@
+# CI workflow for GOOS=cosmo cross-platform testing
+# Tests that APE binaries built on any platform run on Linux
+# (macOS/Windows execution requires full Cosmopolitan runtime, not yet implemented)
+
+name: Cosmopolitan Cross-Platform CI
+
+on:
+  push:
+    branches: [ "claude/*", "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  # Build Go toolchain and APE test binary on each build platform
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        build-os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    runs-on: ${{ matrix.build-os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go bootstrap toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Build Go toolchain (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd src
+          ./make.bash
+        env:
+          GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
+
+      - name: Build Go toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cd src
+          make.bat
+        env:
+          GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
+
+      - name: Create test program
+        shell: bash
+        run: |
+          mkdir -p test
+          cat > test/hello.go << 'GOEOF'
+          package main
+
+          import (
+              "fmt"
+              "runtime"
+          )
+
+          func main() {
+              fmt.Printf("Hello from Cosmopolitan!\n")
+              fmt.Printf("Built with: GOOS=%s GOARCH=%s\n", runtime.GOOS, runtime.GOARCH)
+          }
+          GOEOF
+
+      - name: Build APE binary
+        shell: bash
+        run: |
+          export PATH="$PWD/bin:$PATH"
+          GOOS=cosmo GOARCH=amd64 go build -o hello.com test/hello.go
+          echo "=== APE Header ==="
+          head -c 200 hello.com
+          echo ""
+          echo "=== File info ==="
+          file hello.com 2>/dev/null || true
+          ls -la hello.com
+
+      - name: Upload APE binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ape-binary-${{ matrix.build-os }}
+          path: hello.com
+          retention-days: 1
+
+  # Test APE binaries on Linux and Windows
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        build-os: [ubuntu-latest, macos-latest, windows-latest]
+        test-os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.test-os }}
+
+    steps:
+      - name: Download APE binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ape-binary-${{ matrix.build-os }}
+
+      - name: Test APE binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "Testing binary built on ${{ matrix.build-os }}"
+          chmod +x hello.com
+          ./hello.com
+
+      - name: Test APE binary (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          echo Testing binary built on ${{ matrix.build-os }}
+          hello.com
+
+  # Summary job to report matrix results
+  summary:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check test results
+        run: |
+          echo "=== Cross-Platform Matrix Complete ==="
+          echo ""
+          echo "Build Platforms: ubuntu-latest, macos-latest, windows-latest"
+          echo "Test Platforms:  ubuntu-latest, windows-latest"
+          echo ""
+          echo "Matrix: 3 builds x 2 test platforms = 6 combinations"

@@ -8,6 +8,7 @@ const GOOS = `android`
 
 const IsAix = 0
 const IsAndroid = 1
+const IsCosmo = 0
 const IsDarwin = 0
 const IsDragonfly = 0
 const IsFreebsd = 0

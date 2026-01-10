@@ -1,0 +1,528 @@
+// Copyright 2024 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//go:build cosmo
+
+package runtime
+
+import (
+	"internal/abi"
+	"internal/goarch"
+	"internal/runtime/atomic"
+	"internal/runtime/syscall/cosmo"
+	"unsafe"
+)
+
+// sigPerThreadSyscall is the same signal (SIGSETXID) used by glibc for
+// per-thread syscalls. We use it for the same purpose.
+const sigPerThreadSyscall = _SIGRTMIN + 1
+
+type mOS struct {
+	// profileTimer holds the ID of the POSIX interval timer for profiling CPU
+	// usage on this thread.
+	//
+	// It is valid when the profileTimerValid field is true. A thread
+	// creates and manages its own timer, and these fields are read and written
+	// only by this thread.
+	profileTimer      int32
+	profileTimerValid atomic.Bool
+
+	// needPerThreadSyscall indicates that a per-thread syscall is required
+	// for doAllThreadsSyscall.
+	needPerThreadSyscall atomic.Uint8
+
+	waitsema uint32 // semaphore for parking on locks
+}
+
+// Cosmopolitan uses Linux futex.
+//
+//	futexsleep(uint32 *addr, uint32 val)
+//	futexwakeup(uint32 *addr)
+//
+// Futexsleep atomically checks if *addr == val and if so, sleeps on addr.
+// Futexwakeup wakes up threads sleeping on addr.
+// Futexsleep is allowed to wake up spuriously.
+
+// Atomically,
+//
+//	if(*addr == val) sleep
+//
+// Might be woken up spuriously; that's allowed.
+// Don't sleep longer than ns; ns < 0 means forever.
+//
+//go:nosplit
+func futexsleep(addr *uint32, val uint32, ns int64) {
+	if ns < 0 {
+		futex(unsafe.Pointer(addr), _FUTEX_WAIT_PRIVATE, val, nil, nil, 0)
+		return
+	}
+
+	var ts timespec
+	ts.setNsec(ns)
+	futex(unsafe.Pointer(addr), _FUTEX_WAIT_PRIVATE, val, &ts, nil, 0)
+}
+
+// If any procs are sleeping on addr, wake up at most cnt.
+//
+//go:nosplit
+func futexwakeup(addr *uint32, cnt uint32) {
+	ret := futex(unsafe.Pointer(addr), _FUTEX_WAKE_PRIVATE, cnt, nil, nil, 0)
+	if ret >= 0 {
+		return
+	}
+
+	systemstack(func() {
+		print("futexwakeup addr=", addr, " returned ", ret, "\n")
+	})
+
+	*(*int32)(unsafe.Pointer(uintptr(0x1006))) = 0x1006
+}
+
+func getCPUCount() int32 {
+	// Use a conservative default. On Cosmopolitan, the actual CPU count
+	// is determined at runtime based on the host OS.
+	const maxCPUs = 64 * 1024
+	var buf [maxCPUs / 8]byte
+	r := sched_getaffinity(0, unsafe.Sizeof(buf), &buf[0])
+	if r < 0 {
+		return 1
+	}
+	n := int32(0)
+	for _, v := range buf[:r] {
+		for v != 0 {
+			n += int32(v & 1)
+			v >>= 1
+		}
+	}
+	if n == 0 {
+		n = 1
+	}
+	return n
+}
+
+// cloneFlags for creating new threads
+const cloneFlags = _CLONE_VM | /* share memory */
+	_CLONE_FS | /* share cwd, etc */
+	_CLONE_FILES | /* share fd table */
+	_CLONE_SIGHAND | /* share sig handler table */
+	_CLONE_SYSVSEM | /* share SysV semaphore undo lists */
+	_CLONE_THREAD /* revisit - okay for now */
+
+//go:noescape
+func clone(flags int32, stk, mp, gp, fn unsafe.Pointer) int32
+
+// May run with m.p==nil, so write barriers are not allowed.
+//
+//go:nowritebarrier
+func newosproc(mp *m) {
+	stk := unsafe.Pointer(mp.g0.stack.hi)
+	if false {
+		print("newosproc stk=", stk, " m=", mp, " g=", mp.g0, " clone=", abi.FuncPCABI0(clone), " id=", mp.id, " ostk=", &mp, "\n")
+	}
+
+	// Disable signals during clone, so that the new thread starts
+	// with signals disabled. It will enable them in minit.
+	var oset sigset
+	sigprocmask(_SIG_SETMASK, &sigset_all, &oset)
+	ret := retryOnEAGAIN(func() int32 {
+		r := clone(cloneFlags, stk, unsafe.Pointer(mp), unsafe.Pointer(mp.g0), unsafe.Pointer(abi.FuncPCABI0(mstart)))
+		if r >= 0 {
+			return 0
+		}
+		return -r
+	})
+	sigprocmask(_SIG_SETMASK, &oset, nil)
+
+	if ret != 0 {
+		print("runtime: failed to create new OS thread (have ", mcount(), " already; errno=", ret, ")\n")
+		if ret == _EAGAIN {
+			println("runtime: may need to increase max user processes (ulimit -u)")
+		}
+		throw("newosproc")
+	}
+}
+
+// Version of newosproc that doesn't require a valid G.
+//
+//go:nosplit
+func newosproc0(stacksize uintptr, fn unsafe.Pointer) {
+	stack := sysAlloc(stacksize, &memstats.stacks_sys, "OS thread stack")
+	if stack == nil {
+		writeErrStr(failallocatestack)
+		exit(1)
+	}
+	ret := clone(cloneFlags, unsafe.Pointer(uintptr(stack)+stacksize), nil, nil, fn)
+	if ret < 0 {
+		writeErrStr(failthreadcreate)
+		exit(1)
+	}
+}
+
+const (
+	_AT_NULL   = 0 // End of vector
+	_AT_PAGESZ = 6 // System physical page size
+	_AT_RANDOM = 25
+	_AT_HWCAP  = 16
+	_AT_HWCAP2 = 26
+	_AT_SECURE = 23
+)
+
+var procAuxv = []byte("/proc/self/auxv\x00")
+
+var addrspace_vec [1]byte
+
+func mincore(addr unsafe.Pointer, n uintptr, dst *byte) int32
+
+var auxvreadbuf [128]uintptr
+
+func sysargs(argc int32, argv **byte) {
+	n := argc + 1
+
+	// skip over argv, envp to get to auxv
+	for argv_index(argv, n) != nil {
+		n++
+	}
+
+	// skip NULL separator
+	n++
+
+	// now argv+n is auxv
+	auxvp := (*[1 << 28]uintptr)(add(unsafe.Pointer(argv), uintptr(n)*goarch.PtrSize))
+
+	if pairs := sysauxv(auxvp[:]); pairs != 0 {
+		auxv = auxvp[: pairs*2 : pairs*2]
+		return
+	}
+	// Fall back to /proc/self/auxv.
+	fd := open(&procAuxv[0], 0 /* O_RDONLY */, 0)
+	if fd < 0 {
+		// On some platforms, /proc might not be available.
+		// Try to detect page size using mincore.
+		const size = 256 << 10
+		p, err := mmap(nil, size, _PROT_READ|_PROT_WRITE, _MAP_ANON|_MAP_PRIVATE, -1, 0)
+		if err != 0 {
+			return
+		}
+		var n uintptr
+		for n = 4 << 10; n < size; n <<= 1 {
+			err := mincore(unsafe.Pointer(uintptr(p)+n), 1, &addrspace_vec[0])
+			if err == 0 {
+				physPageSize = n
+				break
+			}
+		}
+		if physPageSize == 0 {
+			physPageSize = size
+		}
+		munmap(p, size)
+		return
+	}
+
+	n = read(fd, noescape(unsafe.Pointer(&auxvreadbuf[0])), int32(unsafe.Sizeof(auxvreadbuf)))
+	closefd(fd)
+	if n < 0 {
+		return
+	}
+	auxvreadbuf[len(auxvreadbuf)-2] = _AT_NULL
+	pairs := sysauxv(auxvreadbuf[:])
+	auxv = auxvreadbuf[: pairs*2 : pairs*2]
+}
+
+var secureMode bool
+
+func sysauxv(auxv []uintptr) (pairs int) {
+	var i int
+	for ; auxv[i] != _AT_NULL; i += 2 {
+		tag, val := auxv[i], auxv[i+1]
+		switch tag {
+		case _AT_RANDOM:
+			startupRand = (*[16]byte)(unsafe.Pointer(val))[:]
+		case _AT_PAGESZ:
+			physPageSize = val
+		case _AT_SECURE:
+			secureMode = val == 1
+		}
+		archauxv(tag, val)
+	}
+	return i / 2
+}
+
+func osinit() {
+	numCPUStartup = getCPUCount()
+}
+
+var urandom_dev = []byte("/dev/urandom\x00")
+
+func readRandom(r []byte) int {
+	fd := open(&urandom_dev[0], 0 /* O_RDONLY */, 0)
+	n := read(fd, unsafe.Pointer(&r[0]), int32(len(r)))
+	closefd(fd)
+	return int(n)
+}
+
+func goenvs() {
+	goenvs_unix()
+}
+
+// Called to do synchronous initialization of Go code built with
+// -buildmode=c-archive or -buildmode=c-shared.
+// None of the Go runtime is initialized.
+//
+//go:nosplit
+//go:nowritebarrierrec
+func libpreinit() {
+	initsig(true)
+}
+
+// Called to initialize a new m (including the bootstrap m).
+// Called on the parent thread (main thread in case of bootstrap), can allocate memory.
+func mpreinit(mp *m) {
+	mp.gsignal = malg(32 * 1024)
+	mp.gsignal.m = mp
+}
+
+func gettid() uint32
+
+// Called to initialize a new m (including the bootstrap m).
+// Called on the new thread, cannot allocate memory.
+func minit() {
+	minitSignals()
+
+	getg().m.procid = uint64(gettid())
+}
+
+// Called from dropm to undo the effect of an minit.
+//
+//go:nosplit
+func unminit() {
+	unminitSignals()
+	getg().m.procid = 0
+}
+
+// Called from mexit, but not from dropm, to undo the effect of thread-owned
+// resources in minit, semacreate, or elsewhere. Do not take locks after calling this.
+//
+// This always runs without a P, so //go:nowritebarrierrec is required.
+//
+//go:nowritebarrierrec
+func mdestroy(mp *m) {
+}
+
+func sigreturn__sigaction()
+func sigtramp()
+func cgoSigtramp()
+
+//go:noescape
+func sigaltstack(new, old *stackt)
+
+//go:noescape
+func setitimer(mode int32, new, old *itimerval)
+
+//go:noescape
+func rtsigprocmask(how int32, new, old *sigset, size int32)
+
+//go:nosplit
+//go:nowritebarrierrec
+func sigprocmask(how int32, new, old *sigset) {
+	rtsigprocmask(how, new, old, int32(unsafe.Sizeof(*new)))
+}
+
+func raise(sig uint32)
+func raiseproc(sig uint32)
+
+//go:noescape
+func sched_getaffinity(pid, len uintptr, buf *byte) int32
+func osyield()
+
+//go:nosplit
+func osyield_no_g() {
+	osyield()
+}
+
+func pipe2(flags int32) (r, w int32, errno int32)
+
+//go:nosplit
+func fcntl(fd, cmd, arg int32) (ret int32, errno int32) {
+	r, _, err := cosmo.Syscall6(cosmo.SYS_FCNTL, uintptr(fd), uintptr(cmd), uintptr(arg), 0, 0, 0)
+	return int32(r), int32(err)
+}
+
+//go:nosplit
+//go:nowritebarrierrec
+func setsig(i uint32, fn uintptr) {
+	var sa sigactiont
+	sa.sa_flags = _SA_SIGINFO | _SA_ONSTACK | _SA_RESTORER | _SA_RESTART
+	sigfillset(&sa.sa_mask)
+	if GOARCH == "386" || GOARCH == "amd64" {
+		sa.sa_restorer = abi.FuncPCABI0(sigreturn__sigaction)
+	}
+	if fn == abi.FuncPCABIInternal(sighandler) {
+		if iscgo {
+			fn = abi.FuncPCABI0(cgoSigtramp)
+		} else {
+			fn = abi.FuncPCABI0(sigtramp)
+		}
+	}
+	sa.sa_handler = fn
+	sigaction(i, &sa, nil)
+}
+
+//go:nosplit
+//go:nowritebarrierrec
+func setsigstack(i uint32) {
+	var sa sigactiont
+	sigaction(i, nil, &sa)
+	if sa.sa_flags&_SA_ONSTACK != 0 {
+		return
+	}
+	sa.sa_flags |= _SA_ONSTACK
+	sigaction(i, &sa, nil)
+}
+
+//go:nosplit
+//go:nowritebarrierrec
+func getsig(i uint32) uintptr {
+	var sa sigactiont
+	sigaction(i, nil, &sa)
+	return sa.sa_handler
+}
+
+// setSignalstackSP sets the ss_sp field of a stackt.
+//
+//go:nosplit
+func setSignalstackSP(s *stackt, sp uintptr) {
+	*(*uintptr)(unsafe.Pointer(&s.ss_sp)) = sp
+}
+
+//go:nosplit
+func (c *sigctxt) fixsigcode(sig uint32) {
+}
+
+// sysSigaction calls the rt_sigaction system call.
+//
+//go:nosplit
+func sysSigaction(sig uint32, new, old *sigactiont) {
+	if rt_sigaction(uintptr(sig), new, old, unsafe.Sizeof(sigactiont{}.sa_mask)) != 0 {
+		if sig != 32 && sig != 33 && sig != 64 {
+			systemstack(func() {
+				throw("sigaction failed")
+			})
+		}
+	}
+}
+
+// rt_sigaction is implemented in assembly.
+//
+//go:noescape
+func rt_sigaction(sig uintptr, new, old *sigactiont, size uintptr) int32
+
+//go:nosplit
+func fixSigactionForCgo(new *sigactiont) {
+	if GOARCH == "386" && new != nil {
+		new.sa_flags &^= _SA_RESTORER
+		new.sa_restorer = 0
+	}
+}
+
+func getpid() int
+func tgkill(tgid, tid, sig int)
+
+// signalM sends a signal to mp.
+func signalM(mp *m, sig int) {
+	tgkill(getpid(), int(mp.procid), sig)
+}
+
+//go:nosplit
+func validSIGPROF(mp *m, c *sigctxt) bool {
+	code := int32(c.sigcode())
+	setitimer := code == _SI_KERNEL
+	timer_create := code == _SI_TIMER
+
+	if !(setitimer || timer_create) {
+		return true
+	}
+
+	if mp == nil {
+		return setitimer
+	}
+
+	if mp.profileTimerValid.Load() {
+		return timer_create
+	}
+
+	return setitimer
+}
+
+func setProcessCPUProfiler(hz int32) {
+	setProcessCPUProfilerTimer(hz)
+}
+
+func setThreadCPUProfiler(hz int32) {
+	mp := getg().m
+	mp.profilehz = hz
+}
+
+const (
+	_SI_USER  = 0
+	_SI_TKILL = -6
+)
+
+//go:nosplit
+func (c *sigctxt) sigFromUser() bool {
+	code := int32(c.sigcode())
+	return code == _SI_USER || code == _SI_TKILL
+}
+
+//go:nosplit
+func (c *sigctxt) sigFromSeccomp() bool {
+	return false
+}
+
+//go:nosplit
+func mprotect(addr unsafe.Pointer, n uintptr, prot int32) (ret int32, errno int32) {
+	r, _, err := cosmo.Syscall6(cosmo.SYS_MPROTECT, uintptr(addr), n, uintptr(prot), 0, 0, 0)
+	return int32(r), int32(err)
+}
+
+// perThreadSyscallArgs contains the system call number, arguments, and
+// expected return values for a system call to be executed on all threads.
+type perThreadSyscallArgs struct {
+	trap uintptr
+	a1   uintptr
+	a2   uintptr
+	a3   uintptr
+	a4   uintptr
+	a5   uintptr
+	a6   uintptr
+	r1   uintptr
+	r2   uintptr
+}
+
+var perThreadSyscall perThreadSyscallArgs
+
+//go:nosplit
+func runPerThreadSyscall() {
+	gp := getg()
+	if gp.m.needPerThreadSyscall.Load() == 0 {
+		return
+	}
+
+	args := perThreadSyscall
+	r1, r2, errno := cosmo.Syscall6(args.trap, args.a1, args.a2, args.a3, args.a4, args.a5, args.a6)
+	if GOARCH == "ppc64" || GOARCH == "ppc64le" {
+		r2 = 0
+	}
+	if errno != 0 || r1 != args.r1 || r2 != args.r2 {
+		print("trap:", args.trap, ", a123456=[", args.a1, ",", args.a2, ",", args.a3, ",", args.a4, ",", args.a5, ",", args.a6, "]\n")
+		print("results: got {r1=", r1, ",r2=", r2, ",errno=", errno, "}, want {r1=", args.r1, ",r2=", args.r2, ",errno=0}\n")
+		fatal("AllThreadsSyscall6 results differ between threads; runtime corrupted")
+	}
+
+	gp.m.needPerThreadSyscall.Store(0)
+}
+
+// futex is implemented in assembly
+//
+//go:noescape
+func futex(addr unsafe.Pointer, op int32, val uint32, ts, addr2 *timespec, val3 uint32) int32
