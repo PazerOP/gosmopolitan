@@ -65,28 +65,16 @@ jobs:
           }
           GOEOF
 
-      - name: Build APE binary (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          export PATH="$PWD/bin:$PATH"
-          GOOS=cosmo GOARCH=amd64 go build -o hello.com test/hello.go
-          echo "=== APE Header ===" 
-          head -c 200 hello.com
-          echo ""
-          echo "=== File info ==="
-          file hello.com || true
-          ls -la hello.com
-
-      - name: Build APE binary (Windows)
-        if: runner.os == 'Windows'
+      - name: Build APE binary
         shell: bash
         run: |
           export PATH="$PWD/bin:$PATH"
           GOOS=cosmo GOARCH=amd64 go build -o hello.com test/hello.go
-          echo "=== APE Header ===" 
+          echo "=== APE Header ==="
           head -c 200 hello.com
           echo ""
           echo "=== File info ==="
+          file hello.com 2>/dev/null || true
           ls -la hello.com
 
       - name: Upload APE binary
@@ -113,44 +101,13 @@ jobs:
         with:
           name: ape-binary-${{ matrix.build-os }}
 
-      - name: Test APE binary (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          echo "Testing binary built on ${{ matrix.build-os }}, running on Linux"
-          chmod +x hello.com
-          ./hello.com
-          echo "Exit code: $?"
-
-      - name: Test APE binary (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "Testing binary built on ${{ matrix.build-os }}, running on macOS"
-          chmod +x hello.com
-          ./hello.com
-          echo "Exit code: $?"
-
-      - name: Test APE binary (Windows via Git Bash)
-        if: runner.os == 'Windows'
+      - name: Test APE binary
         shell: bash
         run: |
-          echo "Testing binary built on ${{ matrix.build-os }}, running on Windows (Git Bash)"
+          echo "Testing binary built on ${{ matrix.build-os }}, running on ${{ runner.os }}"
           chmod +x hello.com
-          # APE shell script header should work in Git Bash
-          ./hello.com || echo "Note: APE may need WSL or native Windows support"
-
-      - name: Test APE binary (Windows via PowerShell)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          echo "Testing binary built on ${{ matrix.build-os }}, running on Windows (PowerShell)"
-          # Try running as native executable (MZ header)
-          try {
-            & .\hello.com
-            echo "Exit code: $LASTEXITCODE"
-          } catch {
-            echo "Note: Native Windows execution may require additional APE support"
-            echo "Error: $_"
-          }
+          ./hello.com
+          echo "Exit code: $?"
 
   # Summary job to report matrix results
   summary:
