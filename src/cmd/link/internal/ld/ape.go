@@ -6,6 +6,7 @@ package ld
 
 import (
 	"cmd/internal/objabi"
+	"cmd/internal/sys"
 	"encoding/binary"
 	"os"
 )
@@ -47,7 +48,7 @@ func (ctxt *Link) convertToAPE() {
 	defer apeFile.Close()
 
 	// Write APE header (MZ + PE + shell script)
-	header := makeAPEHeader(len(elfData))
+	header := makeAPEHeader(len(elfData), ctxt.Arch.Family)
 	if _, err := apeFile.Write(header); err != nil {
 		Exitf("cannot write APE header: %v", err)
 	}
@@ -65,7 +66,7 @@ func (ctxt *Link) convertToAPE() {
 
 // makeAPEHeader creates a proper APE header with both PE and shell script support.
 // The header is a polyglot that works on Windows (via PE) and Unix (via shell script).
-func makeAPEHeader(elfSize int) []byte {
+func makeAPEHeader(elfSize int, archFamily sys.ArchFamily) []byte {
 	header := make([]byte, apeHeaderSize)
 
 	// === DOS Header (64 bytes) ===
@@ -86,7 +87,15 @@ func makeAPEHeader(elfSize int) []byte {
 
 	// COFF Header (20 bytes) at peStart+4
 	coffStart := peStart + 4
-	binary.LittleEndian.PutUint16(header[coffStart+0:], 0x8664)  // Machine: AMD64
+	// Machine type depends on target architecture
+	var machineType uint16
+	switch archFamily {
+	case sys.ARM64:
+		machineType = 0xAA64 // ARM64
+	default:
+		machineType = 0x8664 // AMD64
+	}
+	binary.LittleEndian.PutUint16(header[coffStart+0:], machineType)
 	binary.LittleEndian.PutUint16(header[coffStart+2:], 1)       // NumberOfSections
 	binary.LittleEndian.PutUint32(header[coffStart+4:], 0)       // TimeDateStamp
 	binary.LittleEndian.PutUint32(header[coffStart+8:], 0)       // PointerToSymbolTable
@@ -152,16 +161,22 @@ func makeAPEHeader(elfSize int) []byte {
 	binary.LittleEndian.PutUint32(header[sectStart+36:], 0x60000020) // Characteristics: CODE|EXECUTE|READ
 
 	// === Code Section at file offset 0x200 ===
-	// Minimal x64 code that exits with code 0
-	// This uses the Windows x64 calling convention to call ExitProcess(0)
-	// But since we can't easily import ExitProcess, we just return 0
-	// which works for the entry point of a console app.
+	// Minimal code that exits with code 0
+	// This uses the appropriate calling convention for the target architecture
 	codeStart := 0x200
-	// xor eax, eax  ; return 0
-	// ret
-	header[codeStart+0] = 0x31 // xor eax, eax
-	header[codeStart+1] = 0xC0
-	header[codeStart+2] = 0xC3 // ret
+	switch archFamily {
+	case sys.ARM64:
+		// ARM64: mov x0, #0; ret
+		// MOV X0, #0 = 0xD2800000
+		// RET = 0xD65F03C0
+		binary.LittleEndian.PutUint32(header[codeStart:], 0xD2800000)   // mov x0, #0
+		binary.LittleEndian.PutUint32(header[codeStart+4:], 0xD65F03C0) // ret
+	default:
+		// x86_64: xor eax, eax; ret
+		header[codeStart+0] = 0x31 // xor eax, eax
+		header[codeStart+1] = 0xC0
+		header[codeStart+2] = 0xC3 // ret
+	}
 
 	// Fill rest of code section with newlines (safe for shell here-doc)
 	for i := codeStart + 3; i < 0x400; i++ {
