@@ -202,6 +202,8 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	script.WriteString("__APE__\n")
 
 	// Printf statement for the embedded ELF header (per spec)
+	// The printf must exist for APE interpreters to parse, but we redirect
+	// stdout to /dev/null when running as a shell script to avoid garbage output
 	script.WriteString("printf '")
 	for _, b := range embeddedElf {
 		if b == '\'' {
@@ -212,7 +214,7 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 			fmt.Fprintf(&script, "\\%03o", b)
 		}
 	}
-	script.WriteString("'\n")
+	script.WriteString("' >/dev/null 2>&1\n")
 
 	// Add the main execution logic
 	script.WriteString(`o="$0"
@@ -277,6 +279,12 @@ exit 1
 	// === Mach-O header for macOS x86-64 ===
 	if machoSize > 0 && machoOffset+machoSize <= apeHeaderSize {
 		copy(header[machoOffset:], machoHeader)
+	}
+
+	// Ensure there's a newline before the script (required for heredoc terminator)
+	// The __APE__ at the start of the script must be at the beginning of a line
+	if scriptOffset > 0 {
+		header[scriptOffset-1] = '\n'
 	}
 
 	// Pad remainder with newlines (safe for shell parsing)
