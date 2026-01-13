@@ -105,16 +105,31 @@ jobs:
         run: chmod +x binaries/ape-binary-*/hello.com
 
       - name: Test binary built on Ubuntu
+        id: test-ubuntu
+        continue-on-error: true
         run: binaries/ape-binary-ubuntu-latest/hello.com
         shell: bash
 
       - name: Test binary built on macOS
+        id: test-macos
+        continue-on-error: true
         run: binaries/ape-binary-macos-latest/hello.com
         shell: bash
 
       - name: Test binary built on Windows
+        id: test-windows
+        continue-on-error: true
         run: binaries/ape-binary-windows-latest/hello.com
         shell: bash
+
+      - name: Check test results
+        if: steps.test-ubuntu.outcome == 'failure' || steps.test-macos.outcome == 'failure' || steps.test-windows.outcome == 'failure'
+        run: |
+          echo "One or more tests failed:"
+          echo "  Ubuntu binary: ${{ steps.test-ubuntu.outcome }}"
+          echo "  macOS binary: ${{ steps.test-macos.outcome }}"
+          echo "  Windows binary: ${{ steps.test-windows.outcome }}"
+          exit 1
 
   # Summary job to report matrix results
   summary:
