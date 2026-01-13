@@ -46,44 +46,26 @@ jobs:
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
 
-      - name: Create test program
-        shell: bash
-        run: |
-          mkdir -p test
-          cat > test/hello.go << 'GOEOF'
-          package main
-
-          import (
-              "fmt"
-              "runtime"
-          )
-
-          func main() {
-              fmt.Printf("Hello from Cosmopolitan!\n")
-              fmt.Printf("Built with: GOOS=%s GOARCH=%s\n", runtime.GOOS, runtime.GOARCH)
-          }
-          GOEOF
-
       - name: Build APE binary
         shell: bash
         run: |
           export PATH="$PWD/bin:$PATH"
-          GOOS=cosmo GOARCH=amd64 go build -o hello.com test/hello.go
+          GOOS=cosmo GOARCH=amd64 go build -o fizzbuzz.com testdata/fizzbuzz/fizzbuzz.go
           echo "=== APE Header ==="
-          head -c 200 hello.com
+          head -c 200 fizzbuzz.com
           echo ""
           echo "=== File info ==="
-          file hello.com 2>/dev/null || true
-          ls -la hello.com
+          file fizzbuzz.com 2>/dev/null || true
+          ls -la fizzbuzz.com
 
       - name: Upload APE binary
         uses: actions/upload-artifact@v4
         with:
           name: ape-binary-${{ matrix.build-os }}
-          path: hello.com
+          path: fizzbuzz.com
           retention-days: 1
 
-  # Test all APE binaries on each platform
+  # Test all APE binaries on each platform using bats
   # Each runner tests all 3 binaries sequentially (native + 2 cross-compiled)
   test:
     needs: build
@@ -95,6 +77,11 @@ jobs:
     runs-on: ${{ matrix.test-os }}
 
     steps:
+      - name: Checkout code (for bats tests)
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
       - name: Download all APE binaries
         uses: actions/download-artifact@v4
         with:
@@ -102,25 +89,47 @@ jobs:
 
       - name: Make binaries executable
         if: runner.os != 'Windows'
-        run: chmod +x binaries/ape-binary-*/hello.com
+        run: chmod +x binaries/ape-binary-*/fizzbuzz.com
+
+      - name: Install bats (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Install bats (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bats-core
+
+      - name: Install bats (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          npm install -g bats
 
       - name: Test binary built on Ubuntu
         id: test-ubuntu
         continue-on-error: true
-        run: binaries/ape-binary-ubuntu-latest/hello.com
         shell: bash
+        run: |
+          export FIZZBUZZ_BIN="$PWD/binaries/ape-binary-ubuntu-latest/fizzbuzz.com"
+          bats --print-output-on-failure --show-output-of-passing-tests testdata/fizzbuzz/fizzbuzz.bats
 
       - name: Test binary built on macOS
         id: test-macos
         continue-on-error: true
-        run: binaries/ape-binary-macos-latest/hello.com
         shell: bash
+        run: |
+          export FIZZBUZZ_BIN="$PWD/binaries/ape-binary-macos-latest/fizzbuzz.com"
+          bats --print-output-on-failure --show-output-of-passing-tests testdata/fizzbuzz/fizzbuzz.bats
 
       - name: Test binary built on Windows
         id: test-windows
         continue-on-error: true
-        run: binaries/ape-binary-windows-latest/hello.com
         shell: bash
+        run: |
+          export FIZZBUZZ_BIN="$PWD/binaries/ape-binary-windows-latest/fizzbuzz.com"
+          bats --print-output-on-failure --show-output-of-passing-tests testdata/fizzbuzz/fizzbuzz.bats
 
       - name: Check test results
         if: steps.test-ubuntu.outcome == 'failure' || steps.test-macos.outcome == 'failure' || steps.test-windows.outcome == 'failure'
@@ -130,23 +139,3 @@ jobs:
           echo "  macOS binary: ${{ steps.test-macos.outcome }}"
           echo "  Windows binary: ${{ steps.test-windows.outcome }}"
           exit 1
-
-  # Summary job to report matrix results
-  summary:
-    needs: test
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Check test results
-        run: |
-          echo "=== Cross-Platform Matrix Complete ==="
-          echo ""
-          echo "Build Platforms: ubuntu-latest, macos-latest, windows-latest"
-          echo "Test Platforms:  ubuntu-latest, macos-latest, windows-latest"
-          echo ""
-          echo "Each test runner tested all 3 binaries sequentially:"
-          echo "  - Native binary (built on same OS)"
-          echo "  - 2 cross-compiled binaries (built on other OSes)"
-          echo ""
-          echo "Total: 3 test runners x 3 binaries each = 9 test executions"
