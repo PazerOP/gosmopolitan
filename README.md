@@ -1,42 +1,40 @@
-# The Go Programming Language
+# Gosmopolitan
 
-Go is an open source programming language that makes it easy to build simple,
-reliable, and efficient software.
+This is an **experimental fork** of the [Go programming language](https://github.com/golang/go) that adds support for building **Actually Portable Executables (APE)** using [Cosmopolitan Libc](https://github.com/jart/cosmopolitan).
+
+## What are APE binaries?
+
+APE binaries are single executables that run natively on multiple operating systems—Linux, macOS, and Windows—without modification or recompilation. Build once, run anywhere.
+
+## Building APE Binaries
+
+```bash
+GOOS=cosmo GOARCH=amd64 go build -o program.com main.go
+```
+
+The resulting `.com` file runs on Linux, macOS, and Windows.
+
+## Building the Toolchain
+
+Build from the `src/` directory. Requires a Go 1.24+ bootstrap toolchain.
+
+```bash
+cd src && ./make.bash    # Unix
+cd src && make.bat       # Windows
+```
+
+## Status
+
+This is an experimental project. Use at your own risk.
+
+## Related Projects
+
+- [Go](https://github.com/golang/go) - The official Go programming language repository
+- [Cosmopolitan Libc](https://github.com/jart/cosmopolitan) - Build-once run-anywhere C library
+
+## License
+
+Unless otherwise noted, the Go source files are distributed under the BSD-style license found in the LICENSE file.
 
 ![Gopher image](https://golang.org/doc/gopher/fiveyears.jpg)
-*Gopher image by [Renee French][rf], licensed under [Creative Commons 4.0 Attribution license][cc4-by].*
-
-Our canonical Git repository is located at https://go.googlesource.com/go.
-There is a mirror of the repository at https://github.com/golang/go.
-
-Unless otherwise noted, the Go source files are distributed under the
-BSD-style license found in the LICENSE file.
-
-### Download and Install
-
-#### Binary Distributions
-
-Official binary distributions are available at https://go.dev/dl/.
-
-After downloading a binary release, visit https://go.dev/doc/install
-for installation instructions.
-
-#### Install From Source
-
-If a binary distribution is not available for your combination of
-operating system and architecture, visit
-https://go.dev/doc/install/source
-for source installation instructions.
-
-### Contributing
-
-Go is the work of thousands of contributors. We appreciate your help!
-
-To contribute, please read the contribution guidelines at https://go.dev/doc/contribute.
-
-Note that the Go project uses the issue tracker for bug reports and
-proposals only. See https://go.dev/wiki/Questions for a list of
-places to ask questions about the Go language.
-
-[rf]: https://reneefrench.blogspot.com/
-[cc4-by]: https://creativecommons.org/licenses/by/4.0/
+*Gopher image by [Renee French](https://reneefrench.blogspot.com/), licensed under [Creative Commons 4.0 Attribution license](https://creativecommons.org/licenses/by/4.0/).*
