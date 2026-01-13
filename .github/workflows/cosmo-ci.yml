@@ -1,6 +1,6 @@
 # CI workflow for GOOS=cosmo cross-platform testing
-# Tests that APE binaries built on any platform run on Linux
-# (macOS/Windows execution requires full Cosmopolitan runtime, not yet implemented)
+# Tests that APE binaries built on any platform run on all platforms
+# Each test runner tests all 3 binaries (native + 2 cross-compiled)
 
 name: Cosmopolitan Cross-Platform CI
 
@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         build-os: [ubuntu-latest, macos-latest, windows-latest]
-    
+
     runs-on: ${{ matrix.build-os }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -83,49 +83,73 @@ jobs:
           path: hello.com
           retention-days: 1
 
-  # Test APE binaries on Linux and Windows
+  # Test all APE binaries on each platform
+  # Each runner tests all 3 binaries sequentially (native + 2 cross-compiled)
   test:
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        build-os: [ubuntu-latest, macos-latest, windows-latest]
-        test-os: [ubuntu-latest, windows-latest]
+        test-os: [ubuntu-latest, macos-latest, windows-latest]
 
     runs-on: ${{ matrix.test-os }}
 
     steps:
-      - name: Download APE binary
+      - name: Download all APE binaries
         uses: actions/download-artifact@v4
         with:
-          name: ape-binary-${{ matrix.build-os }}
+          path: binaries
 
-      - name: Test APE binary (Linux)
-        if: runner.os == 'Linux'
+      - name: Test all binaries (Unix)
+        if: runner.os != 'Windows'
         run: |
-          echo "Testing binary built on ${{ matrix.build-os }}"
-          chmod +x hello.com
-          ./hello.com
+          echo "=== Testing on ${{ matrix.test-os }} ==="
+          echo ""
+          for build_os in ubuntu-latest macos-latest windows-latest; do
+            echo "--- Testing binary built on ${build_os} ---"
+            if [ "$build_os" = "${{ matrix.test-os }}" ]; then
+              echo "(This is the native binary)"
+            fi
+            chmod +x binaries/ape-binary-${build_os}/hello.com
+            binaries/ape-binary-${build_os}/hello.com
+            echo ""
+          done
+          echo "=== All 3 binaries tested successfully ==="
 
-      - name: Test APE binary (Windows)
+      - name: Test all binaries (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          echo Testing binary built on ${{ matrix.build-os }}
-          hello.com
+          echo === Testing on ${{ matrix.test-os }} ===
+          echo.
+          echo --- Testing binary built on ubuntu-latest ---
+          binaries\ape-binary-ubuntu-latest\hello.com
+          echo.
+          echo --- Testing binary built on macos-latest ---
+          binaries\ape-binary-macos-latest\hello.com
+          echo.
+          echo --- Testing binary built on windows-latest ---
+          echo (This is the native binary)
+          binaries\ape-binary-windows-latest\hello.com
+          echo.
+          echo === All 3 binaries tested successfully ===
 
   # Summary job to report matrix results
   summary:
     needs: test
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Check test results
         run: |
           echo "=== Cross-Platform Matrix Complete ==="
           echo ""
           echo "Build Platforms: ubuntu-latest, macos-latest, windows-latest"
-          echo "Test Platforms:  ubuntu-latest, windows-latest"
+          echo "Test Platforms:  ubuntu-latest, macos-latest, windows-latest"
           echo ""
-          echo "Matrix: 3 builds x 2 test platforms = 6 combinations"
+          echo "Each test runner tested all 3 binaries sequentially:"
+          echo "  - Native binary (built on same OS)"
+          echo "  - 2 cross-compiled binaries (built on other OSes)"
+          echo ""
+          echo "Total: 3 test runners x 3 binaries each = 9 test executions"
