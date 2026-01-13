@@ -100,27 +100,49 @@ jobs:
         with:
           path: binaries
 
-      - name: Test all binaries (Unix)
-        if: runner.os != 'Windows'
+      - name: Test all binaries (Linux)
+        if: runner.os == 'Linux'
         run: |
-          echo "=== Testing on ${{ matrix.test-os }} ==="
+          echo "=== Testing on Linux ==="
           echo ""
-          for build_os in ubuntu-latest macos-latest windows-latest; do
-            echo "--- Testing binary built on ${build_os} ---"
-            if [ "$build_os" = "${{ matrix.test-os }}" ]; then
-              echo "(This is the native binary)"
-            fi
-            chmod +x binaries/ape-binary-${build_os}/hello.com
-            binaries/ape-binary-${build_os}/hello.com
-            echo ""
-          done
+          echo "--- Testing binary built on ubuntu-latest (native) ---"
+          chmod +x binaries/ape-binary-ubuntu-latest/hello.com
+          binaries/ape-binary-ubuntu-latest/hello.com
+          echo ""
+          echo "--- Testing binary built on macos-latest ---"
+          chmod +x binaries/ape-binary-macos-latest/hello.com
+          binaries/ape-binary-macos-latest/hello.com
+          echo ""
+          echo "--- Testing binary built on windows-latest ---"
+          chmod +x binaries/ape-binary-windows-latest/hello.com
+          binaries/ape-binary-windows-latest/hello.com
+          echo ""
+          echo "=== All 3 binaries tested successfully ==="
+
+      - name: Test all binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "=== Testing on macOS ==="
+          echo ""
+          echo "--- Testing binary built on ubuntu-latest ---"
+          chmod +x binaries/ape-binary-ubuntu-latest/hello.com
+          binaries/ape-binary-ubuntu-latest/hello.com
+          echo ""
+          echo "--- Testing binary built on macos-latest (native) ---"
+          chmod +x binaries/ape-binary-macos-latest/hello.com
+          binaries/ape-binary-macos-latest/hello.com
+          echo ""
+          echo "--- Testing binary built on windows-latest ---"
+          chmod +x binaries/ape-binary-windows-latest/hello.com
+          binaries/ape-binary-windows-latest/hello.com
+          echo ""
           echo "=== All 3 binaries tested successfully ==="
 
       - name: Test all binaries (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          echo === Testing on ${{ matrix.test-os }} ===
+          echo === Testing on Windows ===
           echo.
           echo --- Testing binary built on ubuntu-latest ---
           binaries\ape-binary-ubuntu-latest\hello.com
@@ -128,8 +150,7 @@ jobs:
           echo --- Testing binary built on macos-latest ---
           binaries\ape-binary-macos-latest\hello.com
           echo.
-          echo --- Testing binary built on windows-latest ---
-          echo (This is the native binary)
+          echo --- Testing binary built on windows-latest (native) ---
           binaries\ape-binary-windows-latest\hello.com
           echo.
           echo === All 3 binaries tested successfully ===
