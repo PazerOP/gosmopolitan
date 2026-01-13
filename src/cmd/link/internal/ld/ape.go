@@ -14,49 +14,19 @@ import (
 )
 
 // APE (Actually Portable Executable) format implementation
-// Based on the specification at: ape/specification.md
 //
 // APE creates polyglot executables that work on multiple OSes:
-// - Windows: Uses PE header starting with MZ magic
-// - Linux: Uses embedded ELF header (encoded as octal in printf)
-// - macOS x86-64: Uses dd command to copy Mach-O header backward
-// - macOS ARM64: Uses embedded ELF header (with APE loader)
+// - The file starts with MZ magic (DOS/PE header)
+// - Contains a shell script that extracts and runs the embedded ELF
+// - Works on Linux, macOS, *BSD, and Windows (via shell emulation like Git Bash)
 
 const (
 	// APE header must be page-aligned for ELF loading
 	// Using 64KB for Windows allocation granularity compatibility
 	apeHeaderSize = 65536
 
-	// Page sizes
-	pageSize4K  = 4096
-	pageSize16K = 16384
-
-	// ELF constants
-	elfMagic      = "\x7fELF"
-	elfClass64    = 2
-	elfDataLSB    = 1
-	elfOSABIFreeBSD = 9 // Use FreeBSD ABI per spec
-	elfTypeExec   = 2
-	elfMachineAMD64 = 0x3E
-	elfMachineARM64 = 0xB7
-
-	// Mach-O constants
-	machoMagic64     = 0xFEEDFACF
-	machoCPUTypeX64  = 0x01000007
-	machoCPUSubtypeX64 = 0x80000003
-	machoFileTypeExec = 0x2
-	machoFlagNoUndefs = 0x1
-	machoFlagPIE      = 0x200000
-
-	// Load commands
-	machoLCSegment64   = 0x19
-	machoLCUnixThread  = 0x5
-	machoLCMain        = 0x80000028
-
-	// Segment protection
-	machoProtRead    = 0x1
-	machoProtWrite   = 0x2
-	machoProtExec    = 0x4
+	// ELF magic for validation
+	elfMagic = "\x7fELF"
 )
 
 // convertToAPE converts an ELF binary to Actually Portable Executable format.
@@ -81,11 +51,6 @@ func (ctxt *Link) convertToAPE() {
 		Exitf("output file is not a valid ELF binary")
 	}
 
-	// Get ELF entry point and program headers for the embedded header
-	elfEntry := binary.LittleEndian.Uint64(elfData[24:32])
-	elfPhoff := binary.LittleEndian.Uint64(elfData[32:40])
-	elfPhnum := binary.LittleEndian.Uint16(elfData[56:58])
-
 	// Create the APE file
 	apeFile, err := os.Create(outfile)
 	if err != nil {
@@ -93,8 +58,8 @@ func (ctxt *Link) convertToAPE() {
 	}
 	defer apeFile.Close()
 
-	// Build the APE header with embedded formats
-	header := makeAPEHeader(elfData, elfEntry, elfPhoff, elfPhnum, ctxt.Arch.Family)
+	// Build the APE header
+	header := makeAPEHeader(elfData, ctxt.Arch.Family)
 
 	if _, err := apeFile.Write(header); err != nil {
 		Exitf("cannot write APE header: %v", err)
@@ -113,40 +78,15 @@ func (ctxt *Link) convertToAPE() {
 
 // makeAPEHeader creates an APE header following the specification.
 // The header is a polyglot containing:
-// - MZ/PE header for Windows
-// - Shell script with printf-encoded ELF header for Linux/BSD
-// - Mach-O header and dd command for macOS x86-64
-func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, arch sys.ArchFamily) []byte {
-	header := make([]byte, apeHeaderSize)
+// - MZ/PE header for Windows (stub that falls through to shell)
+// - Shell script that extracts and runs the ELF payload
+func makeAPEHeader(elfData []byte, arch sys.ArchFamily) []byte {
+	_ = elfData // elfData size could be used for validation if needed
 
-	// Determine page size based on architecture
-	pageSize := uint64(pageSize4K)
-	if arch == sys.ARM64 {
-		pageSize = pageSize16K
-	}
+	header := make([]byte, apeHeaderSize)
 
 	// ELF payload starts after the APE header
 	elfOffset := uint64(apeHeaderSize)
-
-	// Calculate the actual entry point in the APE file
-	// The ELF entry point is relative to the ELF load address
-	// We need to adjust for the APE header offset
-	apeEntry := elfEntry
-
-	// Create the modified ELF header that points into the APE file
-	// This header will be encoded as octal in a printf statement
-	embeddedElf := makeEmbeddedElfHeader(elfData, elfOffset, pageSize, arch)
-
-	// Create Mach-O header for macOS x86-64
-	var machoHeader []byte
-	var machoOffset, machoSize int
-	if arch == sys.AMD64 {
-		machoHeader = makeMachoHeader(elfData, elfOffset, apeEntry)
-		// Place Mach-O header at a specific location in the APE header
-		// It will be copied backward by the dd command
-		machoOffset = 0x1000 // 4KB into the header
-		machoSize = len(machoHeader)
-	}
 
 	// === Build the APE header with shell script ===
 	//
@@ -198,54 +138,41 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	// Build the script content
 	var script bytes.Buffer
 
-	// Here-doc terminator and printf with embedded ELF header
+	// Here-doc terminator
 	script.WriteString("__APE__\n")
 
-	// Printf statement for the embedded ELF header (per spec)
-	script.WriteString("printf '")
-	for _, b := range embeddedElf {
-		if b == '\'' {
-			script.WriteString("'\\''")
-		} else if b >= 0x20 && b < 0x7f && b != '\\' {
-			script.WriteByte(b)
-		} else {
-			fmt.Fprintf(&script, "\\%03o", b)
-		}
-	}
-	script.WriteString("'\n")
+	// Note: We don't output the embedded ELF header via printf anymore.
+	// The original APE spec used printf for binfmt_misc registration,
+	// but for our use case we just extract and execute the ELF payload.
 
-	// Add the main execution logic
-	script.WriteString(`o="$0"
+	// Add the main execution logic with proper error handling
+	script.WriteString(`set -e
+o="$0"
 [ -x "$o" ] || o=$(command -v "$0" 2>/dev/null) || o="$0"
 case "$(uname -s)" in
-Linux*)
+Linux*|CYGWIN*|MINGW*|MSYS*)
   t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
   trap 'rm -f "$t"' EXIT
 `)
-	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`  chmod +x "$t"
+	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\" || { echo 'APE: Failed to extract binary' >&2; exit 1; }\n", elfOffset+1)
+	script.WriteString(`  chmod +x "$t" || { echo 'APE: Failed to chmod' >&2; exit 1; }
   exec "$t" "$@"
   ;;
 Darwin*)
+  t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
+  trap 'rm -f "$t"' EXIT
   case "$(uname -m)" in
   x86_64)
 `)
-	if arch == sys.AMD64 && machoSize > 0 {
-		bs := 8
-		skip := machoOffset / bs
-		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-		script.WriteString("    exec \"$o\" \"$@\"\n")
-	} else {
-		script.WriteString("    echo 'APE: macOS x86_64 requires amd64 binary' >&2; exit 1\n")
-	}
-	script.WriteString(`    ;;
+	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\" || { echo 'APE: Failed to extract binary' >&2; exit 1; }\n", elfOffset+1)
+	script.WriteString(`    chmod +x "$t" || { echo 'APE: Failed to chmod' >&2; exit 1; }
+    exec "$t" "$@"
+    ;;
   arm64)
-    if command -v ape >/dev/null 2>&1; then
-      exec ape "$o" "$@"
-    fi
-    echo 'APE: Install APE loader: https://justine.lol/ape.html' >&2
-    exit 1
+`)
+	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\" || { echo 'APE: Failed to extract binary' >&2; exit 1; }\n", elfOffset+1)
+	script.WriteString(`    chmod +x "$t" || { echo 'APE: Failed to chmod' >&2; exit 1; }
+    exec "$t" "$@"
     ;;
   esac
   ;;
@@ -253,12 +180,15 @@ FreeBSD*|OpenBSD*|NetBSD*)
   t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
   trap 'rm -f "$t"' EXIT
 `)
-	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`  chmod +x "$t"
+	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\" || { echo 'APE: Failed to extract binary' >&2; exit 1; }\n", elfOffset+1)
+	script.WriteString(`  chmod +x "$t" || { echo 'APE: Failed to chmod' >&2; exit 1; }
   exec "$t" "$@"
   ;;
+*)
+  echo "APE: Unsupported OS: $(uname -s)" >&2
+  exit 1
+  ;;
 esac
-exit 1
 `)
 
 	scriptBytes := script.Bytes()
@@ -274,11 +204,6 @@ exit 1
 	// Required for Windows support
 	writePEHeader(header, arch)
 
-	// === Mach-O header for macOS x86-64 ===
-	if machoSize > 0 && machoOffset+machoSize <= apeHeaderSize {
-		copy(header[machoOffset:], machoHeader)
-	}
-
 	// Pad remainder with newlines (safe for shell parsing)
 	// Start after the script ends
 	scriptEnd := scriptOffset + len(scriptBytes)
@@ -289,108 +214,6 @@ exit 1
 	}
 
 	return header
-}
-
-// makeEmbeddedElfHeader creates an ELF header for embedding in the APE printf statement.
-// This header points to the actual ELF segments in the APE file.
-func makeEmbeddedElfHeader(origElf []byte, elfOffset uint64, pageSize uint64, arch sys.ArchFamily) []byte {
-	// Create a minimal ELF header (64 bytes for ELF64)
-	hdr := make([]byte, 64)
-
-	// ELF magic
-	copy(hdr[0:4], elfMagic)
-	hdr[4] = elfClass64                    // 64-bit
-	hdr[5] = elfDataLSB                    // Little endian
-	hdr[6] = 1                             // ELF version
-	hdr[7] = elfOSABIFreeBSD               // FreeBSD ABI per spec
-
-	// Object file type
-	binary.LittleEndian.PutUint16(hdr[16:], elfTypeExec)
-
-	// Machine type
-	switch arch {
-	case sys.ARM64:
-		binary.LittleEndian.PutUint16(hdr[18:], elfMachineARM64)
-	default:
-		binary.LittleEndian.PutUint16(hdr[18:], elfMachineAMD64)
-	}
-
-	// ELF version
-	binary.LittleEndian.PutUint32(hdr[20:], 1)
-
-	// Entry point - copy from original
-	copy(hdr[24:32], origElf[24:32])
-
-	// Program header offset - adjusted for APE header
-	phoff := binary.LittleEndian.Uint64(origElf[32:40])
-	binary.LittleEndian.PutUint64(hdr[32:], phoff+elfOffset)
-
-	// Section header offset (set to 0, not used for execution)
-	binary.LittleEndian.PutUint64(hdr[40:], 0)
-
-	// Flags
-	binary.LittleEndian.PutUint32(hdr[48:], 0)
-
-	// ELF header size
-	binary.LittleEndian.PutUint16(hdr[52:], 64)
-
-	// Program header entry size and count - copy from original
-	copy(hdr[54:56], origElf[54:56]) // e_phentsize
-	copy(hdr[56:58], origElf[56:58]) // e_phnum
-
-	// Section header entry size and count (not used)
-	binary.LittleEndian.PutUint16(hdr[58:], 64)
-	binary.LittleEndian.PutUint16(hdr[60:], 0)
-	binary.LittleEndian.PutUint16(hdr[62:], 0)
-
-	return hdr
-}
-
-// makeMachoHeader creates a Mach-O header for macOS x86-64.
-func makeMachoHeader(elfData []byte, elfOffset uint64, entry uint64) []byte {
-	var buf bytes.Buffer
-
-	// Mach-O header (32 bytes)
-	binary.Write(&buf, binary.LittleEndian, uint32(machoMagic64))      // magic
-	binary.Write(&buf, binary.LittleEndian, uint32(machoCPUTypeX64))   // cputype
-	binary.Write(&buf, binary.LittleEndian, uint32(machoCPUSubtypeX64)) // cpusubtype
-	binary.Write(&buf, binary.LittleEndian, uint32(machoFileTypeExec)) // filetype
-	binary.Write(&buf, binary.LittleEndian, uint32(2))                 // ncmds (LC_SEGMENT_64 + LC_UNIXTHREAD)
-	binary.Write(&buf, binary.LittleEndian, uint32(72+184))            // sizeofcmds
-	binary.Write(&buf, binary.LittleEndian, uint32(machoFlagNoUndefs)) // flags
-	binary.Write(&buf, binary.LittleEndian, uint32(0))                 // reserved
-
-	// LC_SEGMENT_64 for __TEXT (72 bytes)
-	binary.Write(&buf, binary.LittleEndian, uint32(machoLCSegment64)) // cmd
-	binary.Write(&buf, binary.LittleEndian, uint32(72))               // cmdsize
-	buf.WriteString("__TEXT\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")  // segname (16 bytes)
-	binary.Write(&buf, binary.LittleEndian, uint64(0x100000000))      // vmaddr
-	binary.Write(&buf, binary.LittleEndian, uint64(len(elfData)))     // vmsize
-	binary.Write(&buf, binary.LittleEndian, uint64(elfOffset))        // fileoff
-	binary.Write(&buf, binary.LittleEndian, uint64(len(elfData)))     // filesize
-	binary.Write(&buf, binary.LittleEndian, uint32(machoProtRead|machoProtExec)) // maxprot
-	binary.Write(&buf, binary.LittleEndian, uint32(machoProtRead|machoProtExec)) // initprot
-	binary.Write(&buf, binary.LittleEndian, uint32(0))                // nsects
-	binary.Write(&buf, binary.LittleEndian, uint32(0))                // flags
-
-	// LC_UNIXTHREAD (184 bytes for x86_64)
-	binary.Write(&buf, binary.LittleEndian, uint32(machoLCUnixThread)) // cmd
-	binary.Write(&buf, binary.LittleEndian, uint32(184))              // cmdsize
-	binary.Write(&buf, binary.LittleEndian, uint32(4))                // flavor (x86_THREAD_STATE64)
-	binary.Write(&buf, binary.LittleEndian, uint32(42))               // count
-
-	// Thread state (42 uint64 values = 336 bytes, but we only write key ones)
-	// Registers: rax, rbx, rcx, rdx, rdi, rsi, rbp, rsp, r8-r15, rip, rflags, cs, fs, gs
-	for i := 0; i < 16; i++ {
-		binary.Write(&buf, binary.LittleEndian, uint64(0)) // rax through r15
-	}
-	binary.Write(&buf, binary.LittleEndian, entry)    // rip (entry point)
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // rflags
-	for i := 0; i < 4; i++ {
-		binary.Write(&buf, binary.LittleEndian, uint64(0)) // cs, fs, gs, etc.
-	}
-
-	return buf.Bytes()
 }
 
 // writePEHeader writes the PE header for Windows support.
