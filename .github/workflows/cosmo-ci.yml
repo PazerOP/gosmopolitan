@@ -79,6 +79,8 @@ jobs:
     steps:
       - name: Checkout code (for bats tests)
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Download all APE binaries
         uses: actions/download-artifact@v4
@@ -137,23 +139,3 @@ jobs:
           echo "  macOS binary: ${{ steps.test-macos.outcome }}"
           echo "  Windows binary: ${{ steps.test-windows.outcome }}"
           exit 1
-
-  # Summary job to report matrix results
-  summary:
-    needs: test
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Check test results
-        run: |
-          echo "=== Cross-Platform Matrix Complete ==="
-          echo ""
-          echo "Build Platforms: ubuntu-latest, macos-latest, windows-latest"
-          echo "Test Platforms:  ubuntu-latest, macos-latest, windows-latest"
-          echo ""
-          echo "Each test runner tested all 3 binaries using bats:"
-          echo "  - Native binary (built on same OS)"
-          echo "  - 2 cross-compiled binaries (built on other OSes)"
-          echo ""
-          echo "Total: 3 test runners x 3 binaries each = 9 test executions"
