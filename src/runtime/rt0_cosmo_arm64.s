@@ -7,7 +7,7 @@
 #include "textflag.h"
 
 TEXT _rt0_arm64_cosmo(SB),NOSPLIT|NOFRAME,$0
-	MOV	0(RSP), R0	// argc
+	MOVD	0(RSP), R0	// argc
 	ADD	$8, RSP, R1	// argv
 	BL	main(SB)
 

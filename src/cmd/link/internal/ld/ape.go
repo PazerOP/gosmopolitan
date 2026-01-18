@@ -238,13 +238,40 @@ if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
 	script.WriteString(`  exec "$0" "$@"
 fi
 if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
-  # ARM64: extract ELF to temp and run (Rosetta on macOS, native on Linux)
-  t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-  trap 'rm -f "$t"' EXIT
-`)
-	fmt.Fprintf(&script, "  tail -c +%d \"$0\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`  chmod +x "$t"
-  exec "$t" "$@"
+  if [ -d /Applications ]; then
+    # macOS ARM64: check for Rosetta, then transform to Mach-O
+    if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+      echo 'APE: This x86_64 binary requires Rosetta 2 on Apple Silicon.' >&2
+      echo 'Install Rosetta with: softwareupdate --install-rosetta' >&2
+      exit 1
+    fi
+    o="$(command -v "$0")"
+    exec 7<> "$o" || exit 121
+    printf '`)
+	// Write the same ELF header for ARM64 macOS
+	for _, b := range embeddedElf {
+		if b == '\'' {
+			script.WriteString("'\\''")
+		} else if b >= 0x20 && b < 0x7f && b != '\\' {
+			script.WriteByte(b)
+		} else {
+			fmt.Fprintf(&script, "\\%03o", b)
+		}
+	}
+	script.WriteString("' >&7\n")
+	script.WriteString("    exec 7<&-\n")
+	// Apply Mach-O header transformation for Rosetta
+	if arch == sys.AMD64 && machoSize > 0 {
+		bs := 8
+		skip := machoOffset / bs
+		count := (machoSize + bs - 1) / bs
+		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
+	}
+	script.WriteString(`    exec "$0" "$@"
+  fi
+  # Linux ARM64: not supported (x86_64 only binary)
+  echo 'APE: ARM64 Linux not supported (x86_64 binary)' >&2
+  exit 1
 fi
 # Windows shells (MSYS/Cygwin): delegate to cmd.exe for PE execution
 case "$(uname -s 2>/dev/null)" in
