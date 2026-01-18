@@ -45,7 +45,7 @@ func TestShellPrintfWithELFMagic(t *testing.T) {
 
 	// Must contain ELF magic as octal: \177ELF
 	elfMagic := []byte("\\177ELF")
-	assert.Contains(t, header, elfMagic, "printf must contain \\177ELF magic")
+	assert.True(t, bytes.Contains(header, elfMagic), "printf must contain \\177ELF magic")
 }
 
 func TestShellPrintfOctalOnly(t *testing.T) {
@@ -84,15 +84,15 @@ func TestShellDdStatement(t *testing.T) {
 func TestShellArchDetection(t *testing.T) {
 	header := first8K(t)
 
-	assert.Contains(t, header, []byte("uname -m"), "must use uname -m for arch detection")
-	assert.Contains(t, header, []byte("x86_64"), "must handle x86_64 arch")
-	assert.Contains(t, header, []byte("amd64"), "must handle amd64 arch")
+	assert.True(t, bytes.Contains(header, []byte("uname -m")), "must use uname -m for arch detection")
+	assert.True(t, bytes.Contains(header, []byte("x86_64")), "must handle x86_64 arch")
+	assert.True(t, bytes.Contains(header, []byte("amd64")), "must handle amd64 arch")
 }
 
 func TestShellMacOSDetection(t *testing.T) {
 	header := first8K(t)
 
-	assert.Contains(t, header, []byte("/Applications"), "must detect macOS via /Applications")
+	assert.True(t, bytes.Contains(header, []byte("/Applications")), "must detect macOS via /Applications")
 }
 
 func TestShellExecReexecution(t *testing.T) {
