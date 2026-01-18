@@ -286,9 +286,13 @@ exit 1
 	}
 
 	// Pad remainder with newlines (safe for shell parsing)
-	// Start after the script ends
+	// Start after the script ends, but skip the Mach-O header region
 	scriptEnd := scriptOffset + len(scriptBytes)
 	for i := scriptEnd; i < apeHeaderSize; i++ {
+		// Don't overwrite the Mach-O header with newlines
+		if machoSize > 0 && i >= machoOffset && i < machoOffset+machoSize {
+			continue
+		}
 		if header[i] == 0 {
 			header[i] = '\n'
 		}
