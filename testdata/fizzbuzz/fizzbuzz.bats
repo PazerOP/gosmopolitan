@@ -9,14 +9,9 @@
 
 # Load bats-assert for proper assertions with clear failure output
 setup() {
-    # Get the directory containing this test file
-    TEST_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
-
-    # Load bats-support (required by bats-assert)
-    load "$TEST_DIR/test_helper/bats-support/load"
-
-    # Load bats-assert for proper assertions
-    load "$TEST_DIR/test_helper/bats-assert/load"
+    TESTDATA_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+    load "$TESTDATA_DIR/test_helper/bats-support/load"
+    load "$TESTDATA_DIR/test_helper/bats-assert/load"
 
     # Validate FIZZBUZZ_BIN is set
     if [[ -z "$FIZZBUZZ_BIN" ]]; then
@@ -43,14 +38,17 @@ setup() {
 #   - Linux: bash (shell script fallback)
 #   - macOS: zsh (shell script fallback)
 #   - Windows: cmd (PE execution path)
+# Note: APE modifies itself on macOS, so we copy to temp each time
 run_fizzbuzz() {
+    local tmp=$(mktemp)
+    cp "$FIZZBUZZ_BIN" "$tmp"
+    chmod +x "$tmp"
     if [[ "$NATIVE_SHELL" == "cmd" ]]; then
-        # Windows cmd needs different invocation
-        run cmd //c "$FIZZBUZZ_BIN $*"
+        run cmd //c "$tmp $*"
     else
-        # Unix shells
-        run "$NATIVE_SHELL" -c "\"$FIZZBUZZ_BIN\" $*"
+        run "$NATIVE_SHELL" -c "\"$tmp\" $*"
     fi
+    rm -f "$tmp"
 }
 
 # ============================================

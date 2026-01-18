@@ -221,43 +221,51 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	}
 	script.WriteString("' >/dev/null 2>&1\n")
 
-	// Add the main execution logic
+	// Add the main execution logic per APE spec
+	// Uses uname -m for architecture detection and /Applications for macOS detection
 	script.WriteString(`o="$0"
 [ -x "$o" ] || o=$(command -v "$0" 2>/dev/null) || o="$0"
-case "$(uname -s)" in
-Linux*)
-  t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-  trap 'rm -f "$t"' EXIT
+m=$(uname -m 2>/dev/null) || m=x86_64
+if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
+  if [ -d /Applications ]; then
 `)
-	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`  chmod +x "$t"
-  exec "$t" "$@"
-  ;;
-Darwin*)
-`)
-	// Use Mach-O transformation for all Darwin (x86_64 runs native, arm64 uses Rosetta2)
+	// macOS x86-64: Use dd to copy Mach-O header to front and re-exec
 	if arch == sys.AMD64 && machoSize > 0 {
 		bs := 8
 		skip := machoOffset / bs
 		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "  dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-		script.WriteString("  exec \"$o\" \"$@\"\n")
+		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
+		script.WriteString("    exec \"$o\" \"$@\"\n")
 	} else {
-		script.WriteString("  echo 'APE: macOS requires amd64 binary' >&2; exit 1\n")
+		script.WriteString("    echo 'APE: unsupported architecture' >&2; exit 1\n")
 	}
-	script.WriteString(`  ;;
-FreeBSD*|OpenBSD*|NetBSD*)
-  t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-  trap 'rm -f "$t"' EXIT
+	script.WriteString(`  else
+    # Linux/BSD x86-64: Extract and run ELF
+    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
+    trap 'rm -f "$t"' EXIT
 `)
-	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`  chmod +x "$t"
-  exec "$t" "$@"
-  ;;
-CYGWIN*|MINGW*|MSYS*)
-  exec cmd //c "$o" "$@"
-  ;;
+	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
+	script.WriteString(`    chmod +x "$t"
+    exec "$t" "$@"
+  fi
+elif [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
+  if [ -d /Applications ]; then
+    echo 'APE: macOS ARM64 requires Rosetta or native build' >&2; exit 1
+  else
+    # Linux ARM64: Extract and run ELF
+    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
+    trap 'rm -f "$t"' EXIT
+`)
+	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
+	script.WriteString(`    chmod +x "$t"
+    exec "$t" "$@"
+  fi
+fi
+# Windows shells (MSYS/Cygwin): delegate to cmd.exe for PE execution
+case "$(uname -s 2>/dev/null)" in
+CYGWIN*|MINGW*|MSYS*) exec cmd //c "$o" "$@" ;;
 esac
+echo 'APE: unsupported platform' >&2
 exit 1
 `)
 
@@ -357,7 +365,30 @@ func makeEmbeddedElfHeader(origElf []byte, elfOffset uint64, pageSize uint64, ar
 }
 
 // makeMachoHeader creates a Mach-O header for macOS x86-64.
-func makeMachoHeader(elfData []byte, elfOffset uint64, entry uint64) []byte {
+func makeMachoHeader(elfData []byte, elfOffset uint64, elfEntry uint64) []byte {
+	// Find ELF base virtual address from the first PT_LOAD segment
+	// ELF program header offset is at byte 32, entry size at 54, count at 56
+	elfPhoff := binary.LittleEndian.Uint64(elfData[32:40])
+	elfPhentsize := binary.LittleEndian.Uint16(elfData[54:56])
+	elfPhnum := binary.LittleEndian.Uint16(elfData[56:58])
+
+	var elfBaseVAddr uint64
+	for i := uint16(0); i < elfPhnum; i++ {
+		phdr := elfData[elfPhoff+uint64(i)*uint64(elfPhentsize):]
+		pType := binary.LittleEndian.Uint32(phdr[0:4])
+		if pType == 1 { // PT_LOAD
+			elfBaseVAddr = binary.LittleEndian.Uint64(phdr[16:24]) // p_vaddr
+			break
+		}
+	}
+
+	// Mach-O loads at this virtual address
+	const machoVMAddr = uint64(0x100000000)
+
+	// Calculate the Mach-O entry point
+	// The ELF entry is relative to elfBaseVAddr, so adjust for machoVMAddr
+	machoEntry := machoVMAddr + (elfEntry - elfBaseVAddr)
+
 	var buf bytes.Buffer
 
 	// Mach-O header (32 bytes)
@@ -374,9 +405,9 @@ func makeMachoHeader(elfData []byte, elfOffset uint64, entry uint64) []byte {
 	binary.Write(&buf, binary.LittleEndian, uint32(machoLCSegment64)) // cmd
 	binary.Write(&buf, binary.LittleEndian, uint32(72))               // cmdsize
 	buf.WriteString("__TEXT\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")  // segname (16 bytes)
-	binary.Write(&buf, binary.LittleEndian, uint64(0x100000000))      // vmaddr
+	binary.Write(&buf, binary.LittleEndian, machoVMAddr)              // vmaddr
 	binary.Write(&buf, binary.LittleEndian, uint64(len(elfData)))     // vmsize
-	binary.Write(&buf, binary.LittleEndian, uint64(elfOffset))        // fileoff
+	binary.Write(&buf, binary.LittleEndian, elfOffset)                // fileoff
 	binary.Write(&buf, binary.LittleEndian, uint64(len(elfData)))     // filesize
 	binary.Write(&buf, binary.LittleEndian, uint32(machoProtRead|machoProtExec)) // maxprot
 	binary.Write(&buf, binary.LittleEndian, uint32(machoProtRead|machoProtExec)) // initprot
@@ -394,8 +425,8 @@ func makeMachoHeader(elfData []byte, elfOffset uint64, entry uint64) []byte {
 	for i := 0; i < 16; i++ {
 		binary.Write(&buf, binary.LittleEndian, uint64(0)) // rax through r15
 	}
-	binary.Write(&buf, binary.LittleEndian, entry)    // rip (entry point)
-	binary.Write(&buf, binary.LittleEndian, uint64(0)) // rflags
+	binary.Write(&buf, binary.LittleEndian, machoEntry) // rip (entry point)
+	binary.Write(&buf, binary.LittleEndian, uint64(0))  // rflags
 	for i := 0; i < 4; i++ {
 		binary.Write(&buf, binary.LittleEndian, uint64(0)) // cs, fs, gs, etc.
 	}

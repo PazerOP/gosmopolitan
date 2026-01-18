@@ -2230,6 +2230,10 @@ elfobj:
 		osabi = elf.ELFOSABI_OPENBSD
 	case objabi.Hdragonfly:
 		osabi = elf.ELFOSABI_NONE
+	case objabi.Hcosmo:
+		// APE spec: OS ABI SHOULD be ELFOSABI_FREEBSD since FreeBSD
+		// is the only supported OS that actually checks this field
+		osabi = elf.ELFOSABI_FREEBSD
 	}
 	eh.Ident[elf.EI_OSABI] = byte(osabi)
 
