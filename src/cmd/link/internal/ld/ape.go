@@ -203,13 +203,19 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	// Build the script content
 	var script bytes.Buffer
 
-	// Here-doc terminator and printf with embedded ELF header
+	// Here-doc terminator
 	script.WriteString("__APE__\n")
 
-	// Printf statement for the embedded ELF header (per spec)
-	// The printf must exist for APE interpreters to parse, but we redirect
-	// stdout to /dev/null when running as a shell script to avoid garbage output
-	script.WriteString("printf '")
+	// APE execution logic - matches vim.com's proven approach
+	// 1. Detect architecture with uname -m
+	// 2. For x86_64: open file r/w, write ELF header, on macOS also dd Mach-O header, re-exec
+	// 3. For ARM64: extract ELF to temp and run (via Rosetta on macOS)
+	script.WriteString(`m=$(uname -m 2>/dev/null) || m=x86_64
+if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
+  o="$(command -v "$0")"
+  exec 7<> "$o" || exit 121
+  printf '`)
+	// Write ELF header that will be written to file descriptor 7
 	for _, b := range embeddedElf {
 		if b == '\'' {
 			script.WriteString("'\\''")
@@ -219,57 +225,30 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 			fmt.Fprintf(&script, "\\%03o", b)
 		}
 	}
-	script.WriteString("' >/dev/null 2>&1\n")
+	script.WriteString("' >&7\n")
+	script.WriteString("  exec 7<&-\n")
 
-	// Add the main execution logic per APE spec
-	// Uses uname -m for architecture detection and /Applications for macOS detection
-	script.WriteString(`o="$0"
-[ -x "$o" ] || o=$(command -v "$0" 2>/dev/null) || o="$0"
-m=$(uname -m 2>/dev/null) || m=x86_64
-if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
-  if [ -d /Applications ]; then
-`)
-	// macOS x86-64: Use dd to copy Mach-O header to front and re-exec
+	// macOS x86-64: copy Mach-O header to front
 	if arch == sys.AMD64 && machoSize > 0 {
 		bs := 8
 		skip := machoOffset / bs
 		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-		script.WriteString("    exec \"$o\" \"$@\"\n")
-	} else {
-		script.WriteString("    echo 'APE: unsupported architecture' >&2; exit 1\n")
+		fmt.Fprintf(&script, "  [ -d /Applications ] && dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
 	}
-	script.WriteString(`  else
-    # Linux/BSD x86-64: Extract and run ELF
-    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-    trap 'rm -f "$t"' EXIT
+	script.WriteString(`  exec "$0" "$@"
+fi
+if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
+  # ARM64: extract ELF to temp and run (Rosetta on macOS, native on Linux)
+  t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
+  trap 'rm -f "$t"' EXIT
 `)
-	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`    chmod +x "$t"
-    exec "$t" "$@"
-  fi
-elif [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
-  if [ -d /Applications ]; then
-    # macOS ARM64: Extract x86_64 ELF and run via Rosetta
-    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-    trap 'rm -f "$t"' EXIT
-`)
-	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`    chmod +x "$t"
-    exec "$t" "$@"
-  else
-    # Linux ARM64: Extract and run ELF
-    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
-    trap 'rm -f "$t"' EXIT
-`)
-	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
-	script.WriteString(`    chmod +x "$t"
-    exec "$t" "$@"
-  fi
+	fmt.Fprintf(&script, "  tail -c +%d \"$0\" > \"$t\"\n", elfOffset+1)
+	script.WriteString(`  chmod +x "$t"
+  exec "$t" "$@"
 fi
 # Windows shells (MSYS/Cygwin): delegate to cmd.exe for PE execution
 case "$(uname -s 2>/dev/null)" in
-CYGWIN*|MINGW*|MSYS*) exec cmd //c "$o" "$@" ;;
+CYGWIN*|MINGW*|MSYS*) exec cmd //c "$0" "$@" ;;
 esac
 echo 'APE: unsupported platform' >&2
 exit 1
