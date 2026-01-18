@@ -100,6 +100,17 @@ func (ctxt *Link) convertToAPE() {
 		Exitf("cannot write APE header: %v", err)
 	}
 
+	// Adjust program header p_offset values to account for APE header
+	// The ELF data will be at file offset apeHeaderSize, so all p_offset
+	// values need to be increased by apeHeaderSize
+	elfPhentsize := binary.LittleEndian.Uint16(elfData[54:56])
+	for i := uint16(0); i < elfPhnum; i++ {
+		phdrOffset := elfPhoff + uint64(i)*uint64(elfPhentsize)
+		// p_offset is at byte 8 of each program header (64-bit ELF)
+		pOffset := binary.LittleEndian.Uint64(elfData[phdrOffset+8:])
+		binary.LittleEndian.PutUint64(elfData[phdrOffset+8:], pOffset+uint64(apeHeaderSize))
+	}
+
 	// Write the ELF payload at the expected offset
 	if _, err := apeFile.Write(elfData); err != nil {
 		Exitf("cannot write ELF payload: %v", err)

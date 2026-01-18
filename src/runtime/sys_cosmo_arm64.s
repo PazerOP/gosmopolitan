@@ -414,13 +414,18 @@ setitimer_darwin:
 	RET
 
 TEXT runtime·mincore(SB),NOSPLIT,$0-28
-	// mincore is same on both - use syscall directly
-	// macOS ARM64 may not support this, but we'll try
+	CHECK_DARWIN(mincore_darwin)
+	// Linux path
 	MOVD	addr+0(FP), R0
 	MOVD	n+8(FP), R1
 	MOVD	dst+16(FP), R2
 	MOVD	$SYS_mincore, R8
 	SVC
+	MOVW	R0, ret+24(FP)
+	RET
+mincore_darwin:
+	// macOS ARM64: mincore not in Syslib, return -1 (ENOSYS)
+	MOVW	$-1, R0
 	MOVW	R0, ret+24(FP)
 	RET
 
@@ -544,6 +549,16 @@ nanotime_finish:
 	MUL	R4, R3
 	ADD	R5, R3
 	MOVD	R3, ret+0(FP)
+
+	// DEBUG: Exit 68 before nanotime1 returns
+	MOVW	runtime·__hostos(SB), R9
+	CMPW	$HOSTXNU, R9
+	BNE	nanotime1_ret_skip_debug
+	MOVD	runtime·__syslib(SB), R9
+	MOVD	224(R9), R12
+	MOVD	$68, R0
+	BL	(R12)
+nanotime1_ret_skip_debug:
 	RET
 
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0-28
@@ -658,26 +673,102 @@ mmap_ok:
 	RET
 mmap_darwin:
 	// macOS path: call Syslib mmap
+	// Save LR
+	MOVD	LR, R19
 	MOVD	runtime·__syslib(SB), R9
-	MOVD	40(R9), R12
+	CMP	$0, R9
+	BEQ	mmap_darwin_nosyslib
+	MOVD	40(R9), R12              // mmap function pointer
+	CMP	$0, R12
+	BEQ	mmap_darwin_nommap
+
+	// Load all arguments BEFORE any stack manipulation
+	// R0-R5 will hold the mmap arguments
 	MOVD	addr+0(FP), R0
 	MOVD	n+8(FP), R1
 	MOVW	prot+16(FP), R2
 	MOVW	flags+20(FP), R3
 	MOVW	fd+24(FP), R4
-	MOVW	off+28(FP), R5
-	SUB	$16, RSP
-	BL	(R12)
-	ADD	$16, RSP
-	CMN	$4095, R0
+	MOVWU	off+28(FP), R5
+
+	// Translate Linux flags to macOS flags:
+	// Linux MAP_ANONYMOUS = 0x20, macOS MAP_ANON = 0x1000
+	AND	$0x20, R3, R6            // Extract MAP_ANONYMOUS bit
+	CMP	$0, R6
+	BEQ	mmap_darwin_no_anon
+	AND	$~0x20, R3, R3           // Clear Linux MAP_ANONYMOUS
+	ORR	$0x1000, R3, R3          // Set macOS MAP_ANON
+mmap_darwin_no_anon:
+
+	// Sign-extend fd for -1 to become proper 64-bit -1
+	SXTW	R4, R4
+
+	// Now save R0-R5 and R12 to stack, then align stack
+	MOVD	RSP, R7                  // R7 = original SP
+	SUB	$80, RSP                 // Allocate space for saved values + alignment
+	MOVD	RSP, R6
+	AND	$~15, R6, R6
+	MOVD	R6, RSP                  // RSP now aligned
+
+	// Save original SP, mmap pointer, and all arguments
+	MOVD	R7, (RSP)                // [RSP+0] = original SP
+	MOVD	R12, 8(RSP)              // [RSP+8] = mmap function pointer
+	MOVD	R0, 16(RSP)              // [RSP+16] = addr
+	MOVD	R1, 24(RSP)              // [RSP+24] = n
+	MOVD	R2, 32(RSP)              // [RSP+32] = prot
+	MOVD	R3, 40(RSP)              // [RSP+40] = flags (translated)
+	MOVD	R4, 48(RSP)              // [RSP+48] = fd
+	MOVD	R5, 56(RSP)              // [RSP+56] = off
+
+	// Reload arguments from stack and call mmap
+	MOVD	16(RSP), R0
+	MOVD	24(RSP), R1
+	MOVD	32(RSP), R2
+	MOVD	40(RSP), R3
+	MOVD	48(RSP), R4
+	MOVD	56(RSP), R5
+	MOVD	8(RSP), R12
+
+	// Load all arguments from stack for the mmap call
+	MOVD	16(RSP), R0              // addr from stack
+	MOVD	24(RSP), R1              // n from stack
+	MOVD	32(RSP), R2              // prot from stack
+	MOVD	40(RSP), R3              // flags from stack (translated)
+	MOVD	48(RSP), R4              // fd from stack
+	MOVD	56(RSP), R5              // off from stack
+
+	BL	(R12)                        // Call mmap
+
+	// R0 now contains mmap result
+	// Save result and restore stack
+	MOVD	R0, R6                   // Save result in R6
+	MOVD	(RSP), R7                // Original SP
+	MOVD	R7, RSP                  // Restore SP
+	MOVD	R19, LR                  // Restore LR
+
+	// Check for error: if R6 >= -4095 (unsigned), it's an error (-errno)
+	CMN	$4095, R6
 	BCC	mmap_darwin_ok
-	NEG	R0, R0
+
+	// Error case - return error
+	NEG	R6, R6
 	MOVD	$0, p+32(FP)
+	MOVD	R6, err+40(FP)
+	RET
+
+mmap_darwin_ok:
+	MOVD	R6, p+32(FP)
+	MOVD	$0, err+40(FP)
+	RET
+mmap_darwin_nosyslib:
+	MOVD	$0, p+32(FP)
+	MOVD	$12, R0
 	MOVD	R0, err+40(FP)
 	RET
-mmap_darwin_ok:
-	MOVD	R0, p+32(FP)
-	MOVD	$0, err+40(FP)
+mmap_darwin_nommap:
+	MOVD	$0, p+32(FP)
+	MOVD	$12, R0
+	MOVD	R0, err+40(FP)
 	RET
 
 TEXT runtime·munmap(SB),NOSPLIT,$0
@@ -707,14 +798,19 @@ munmap_darwin_cool:
 	RET
 
 TEXT runtime·madvise(SB),NOSPLIT,$0-28
-	// madvise - use syscall on both platforms
-	// macOS ARM64: try syscall, may fail but that's OK for madvise
+	CHECK_DARWIN(madvise_darwin)
+	// Linux path
 	MOVD	addr+0(FP), R0
 	MOVD	n+8(FP), R1
 	MOVW	flags+16(FP), R2
 	MOVD	$SYS_madvise, R8
 	SVC
 	MOVW	R0, ret+24(FP)
+	RET
+madvise_darwin:
+	// macOS ARM64: madvise not in Syslib, return 0 (success)
+	// The Go runtime handles madvise failures gracefully
+	MOVW	$0, ret+24(FP)
 	RET
 
 // int64 futex(int32 *uaddr, int32 op, int32 val,
