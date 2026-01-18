@@ -7,18 +7,7 @@
 #include "textflag.h"
 
 TEXT _rt0_arm64_cosmo(SB),NOSPLIT|NOFRAME,$0
-	MOVD	0(RSP), R0	// argc
-	ADD	$8, RSP, R1	// argv
-	BL	main(SB)
+	JMP	_rt0_arm64(SB)
 
 TEXT _rt0_arm64_cosmo_lib(SB),NOSPLIT,$0
-	B	_rt0_arm64_lib(SB)
-
-TEXT main(SB),NOSPLIT|NOFRAME,$0
-	MOVD	$runtime·rt0_go(SB), R2
-	BL	(R2)
-exit:
-	MOVD	$0, R0
-	MOVD	$94, R8	// SYS_exit_group
-	SVC
-	B	exit
+	JMP	_rt0_arm64_lib(SB)
