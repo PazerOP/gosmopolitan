@@ -154,42 +154,47 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	// 1. DOS/PE: Starts with "MZ", e_lfanew at 0x3C points to PE header at 0x80
 	// 2. Shell: Valid shell script that can run on UNIX systems
 	//
-	// Structure:
-	// - Bytes 0-7: "MZqFpD='" - DOS magic + shell variable start
-	// - Byte 8: newline (required by spec for shell safety)
-	// - Bytes 9-59: Filler (inside shell single quote)
-	// - Bytes 60-63 (0x3C): e_lfanew = 0x80 (binary, inside quote)
-	// - Bytes 64-127: More filler until we close the quote
-	// - After PE header area: Close quote and actual script
+	// CRITICAL: The e_lfanew field at 0x3C contains null bytes (0x80 0x00 0x00 0x00).
+	// Bash cannot handle null bytes in the shell-parsed portion of a script.
+	// Solution: Start the heredoc BEFORE 0x3C so null bytes are in heredoc body.
 	//
-	// The shell script is placed after offset 0x200 to avoid PE header conflicts
+	// Structure:
+	// - Bytes 0x00-0x07: "MZqFpD='" - DOS magic + shell variable start
+	// - Byte 0x08: newline (inside quoted string)
+	// - Bytes 0x09-0x2B: spaces (inside quoted string, 35 bytes)
+	// - Byte 0x2C: "'" - close the quoted string
+	// - Bytes 0x2D-0x3B: "\n: <<'__APE__'\n" - heredoc opener (15 bytes)
+	// - Bytes 0x3C+: heredoc body (contains e_lfanew with null bytes - SAFE!)
+	// - PE header at 0x80 (inside heredoc body)
+	// - Script at 0x400 starts with "__APE__\n" to terminate heredoc
 
 	// Write the APE magic at offset 0
 	copy(header[0:8], []byte("MZqFpD='"))
 	header[8] = '\n'
 
-	// Fill bytes 9-59 with safe characters (inside the single-quoted string)
-	// These will be part of the shell variable value (ignored)
-	for i := 9; i < 0x3C; i++ {
+	// Fill bytes 0x09-0x2B with spaces (inside the single-quoted string)
+	for i := 0x09; i < 0x2C; i++ {
 		header[i] = ' '
 	}
 
+	// Close the quoted string at 0x2C
+	header[0x2C] = '\''
+
+	// Heredoc opener at 0x2D-0x3B (15 bytes: "\n: <<'__APE__'\n")
+	// The trailing newline ends the heredoc opener line.
+	// Heredoc body starts at 0x3C.
+	heredocOpener := []byte("\n: <<'__APE__'\n")
+	copy(header[0x2D:], heredocOpener)
+
+	// Now 0x3C+ is heredoc body - null bytes are safe here!
 	// e_lfanew at 0x3C-0x3F - must point to PE header at 0x80
-	// This binary data is inside the single-quoted string (safe)
 	binary.LittleEndian.PutUint32(header[0x3C:], 0x80)
 
-	// Fill bytes 0x40-0x7F with spaces (still in quoted string)
+	// Fill bytes 0x40-0x7F with safe content (heredoc body)
+	// Use printable characters to avoid any shell parsing issues
 	for i := 0x40; i < 0x80; i++ {
-		header[i] = ' '
+		header[i] = '#'
 	}
-
-	// PE header goes at 0x80 - this is binary data
-	// We need to close the quote before this and use a here-doc to absorb it
-	// Rewrite bytes just before 0x80 to close quote and start here-doc
-
-	// At byte 0x40, close the quote and start a here-doc to absorb PE header
-	heredocStart := []byte("'\n: <<'__APE__'\n")
-	copy(header[0x40:], heredocStart)
 
 	// The PE header at 0x80 will be absorbed by the here-doc
 	// We need to place the here-doc terminator and script after the PE header area
