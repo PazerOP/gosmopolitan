@@ -113,8 +113,8 @@ func archinit(ctxt *ld.Link) {
 			*ld.FlagRound = 0x4000 // 16K page alignment for ARM64
 		}
 		if *ld.FlagTextAddr == -1 {
-			// Use high address to match x86_64 APE layout
-			*ld.FlagTextAddr = ld.Rnd(0x200000000, *ld.FlagRound) + int64(ld.HEADR)
+			// Use 0x800000000 to match Cosmopolitan ARM64 layout
+			*ld.FlagTextAddr = ld.Rnd(0x800000000, *ld.FlagRound) + int64(ld.HEADR)
 		}
 
 	case objabi.Hdarwin: /* apple MACH */

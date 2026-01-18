@@ -206,40 +206,39 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 	// Here-doc terminator
 	script.WriteString("__APE__\n")
 
-	// APE execution logic - matches vim.com's proven approach
-	// 1. Detect architecture with uname -m
-	// 2. For x86_64: open file r/w, write ELF header, on macOS also dd Mach-O header, re-exec
-	// 3. For ARM64: extract ELF to temp and run (via Rosetta on macOS)
-	script.WriteString(`m=$(uname -m 2>/dev/null) || m=x86_64
-if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
+	// APE execution logic - architecture-specific
+	// For AMD64 builds: run on x86_64, require Rosetta on ARM64 macOS
+	// For ARM64 builds: run on ARM64, use APE loader on macOS
+	script.WriteString("m=$(uname -m 2>/dev/null) || m=x86_64\n")
+
+	if arch == sys.AMD64 {
+		// AMD64 binary: runs on x86_64 systems
+		script.WriteString(`if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
   o="$(command -v "$0")"
   exec 7<> "$o" || exit 121
   printf '`)
-	// Write ELF header that will be written to file descriptor 7
-	for _, b := range embeddedElf {
-		if b == '\'' {
-			script.WriteString("'\\''")
-		} else if b >= 0x20 && b < 0x7f && b != '\\' {
-			script.WriteByte(b)
-		} else {
-			fmt.Fprintf(&script, "\\%03o", b)
+		for _, b := range embeddedElf {
+			if b == '\'' {
+				script.WriteString("'\\''")
+			} else if b >= 0x20 && b < 0x7f && b != '\\' {
+				script.WriteByte(b)
+			} else {
+				fmt.Fprintf(&script, "\\%03o", b)
+			}
 		}
-	}
-	script.WriteString("' >&7\n")
-	script.WriteString("  exec 7<&-\n")
-
-	// macOS x86-64: copy Mach-O header to front
-	if arch == sys.AMD64 && machoSize > 0 {
-		bs := 8
-		skip := machoOffset / bs
-		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "  [ -d /Applications ] && dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-	}
-	script.WriteString(`  exec "$0" "$@"
+		script.WriteString("' >&7\n")
+		script.WriteString("  exec 7<&-\n")
+		if machoSize > 0 {
+			bs := 8
+			skip := machoOffset / bs
+			count := (machoSize + bs - 1) / bs
+			fmt.Fprintf(&script, "  [ -d /Applications ] && dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
+		}
+		script.WriteString(`  exec "$0" "$@"
 fi
 if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
   if [ -d /Applications ]; then
-    # macOS ARM64: check for Rosetta, then transform to Mach-O
+    # macOS ARM64 running x86_64 binary: check for Rosetta
     if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
       echo 'APE: This x86_64 binary requires Rosetta 2 on Apple Silicon.' >&2
       echo 'Install Rosetta with: softwareupdate --install-rosetta' >&2
@@ -248,32 +247,60 @@ if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
     o="$(command -v "$0")"
     exec 7<> "$o" || exit 121
     printf '`)
-	// Write the same ELF header for ARM64 macOS
-	for _, b := range embeddedElf {
-		if b == '\'' {
-			script.WriteString("'\\''")
-		} else if b >= 0x20 && b < 0x7f && b != '\\' {
-			script.WriteByte(b)
-		} else {
-			fmt.Fprintf(&script, "\\%03o", b)
+		for _, b := range embeddedElf {
+			if b == '\'' {
+				script.WriteString("'\\''")
+			} else if b >= 0x20 && b < 0x7f && b != '\\' {
+				script.WriteByte(b)
+			} else {
+				fmt.Fprintf(&script, "\\%03o", b)
+			}
 		}
-	}
-	script.WriteString("' >&7\n")
-	script.WriteString("    exec 7<&-\n")
-	// Apply Mach-O header transformation for Rosetta
-	if arch == sys.AMD64 && machoSize > 0 {
-		bs := 8
-		skip := machoOffset / bs
-		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-	}
-	script.WriteString(`    exec "$0" "$@"
+		script.WriteString("' >&7\n")
+		script.WriteString("    exec 7<&-\n")
+		if machoSize > 0 {
+			bs := 8
+			skip := machoOffset / bs
+			count := (machoSize + bs - 1) / bs
+			fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
+		}
+		script.WriteString(`    exec "$0" "$@"
   fi
-  # Linux ARM64: not supported (x86_64 only binary)
-  echo 'APE: ARM64 Linux not supported (x86_64 binary)' >&2
+  echo 'APE: ARM64 Linux cannot run x86_64 binary' >&2
   exit 1
 fi
-# Windows shells (MSYS/Cygwin): delegate to cmd.exe for PE execution
+`)
+	} else if arch == sys.ARM64 {
+		// ARM64 binary: runs on ARM64 systems
+		script.WriteString(`if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
+  echo 'APE: x86_64 cannot run ARM64 binary' >&2
+  exit 1
+fi
+if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
+  # Check for APE loader first
+  t="${TMPDIR:-${HOME:-.}}/.ape-1.10"
+  [ -x "$t" ] && exec "$t" "$0" "$@"
+  # Transform and run
+  o="$(command -v "$0")"
+  exec 7<> "$o" || exit 121
+  printf '`)
+		for _, b := range embeddedElf {
+			if b == '\'' {
+				script.WriteString("'\\''")
+			} else if b >= 0x20 && b < 0x7f && b != '\\' {
+				script.WriteByte(b)
+			} else {
+				fmt.Fprintf(&script, "\\%03o", b)
+			}
+		}
+		script.WriteString("' >&7\n")
+		script.WriteString("  exec 7<&-\n")
+		script.WriteString(`  exec "$0" "$@"
+fi
+`)
+	}
+
+	script.WriteString(`# Windows shells (MSYS/Cygwin): delegate to cmd.exe for PE execution
 case "$(uname -s 2>/dev/null)" in
 CYGWIN*|MINGW*|MSYS*) exec cmd //c "$0" "$@" ;;
 esac
