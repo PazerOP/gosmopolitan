@@ -19,8 +19,8 @@ import (
 // APE creates polyglot executables that work on multiple OSes:
 // - Windows: Uses PE header starting with MZ magic
 // - Linux: Uses embedded ELF header (encoded as octal in printf)
-// - macOS x86-64: Uses dd command to copy Mach-O header backward
-// - macOS ARM64: Uses embedded ELF header (with APE loader)
+// - macOS: Uses dd command to copy Mach-O header backward (ARM64 uses Rosetta2)
+// - Windows shell (MSYS/Cygwin): Delegates to cmd.exe for PE execution
 
 const (
 	// APE header must be page-aligned for ELF loading
@@ -229,28 +229,18 @@ Linux*)
   exec "$t" "$@"
   ;;
 Darwin*)
-  case "$(uname -m)" in
-  x86_64)
 `)
+	// Use Mach-O transformation for all Darwin (x86_64 runs native, arm64 uses Rosetta2)
 	if arch == sys.AMD64 && machoSize > 0 {
 		bs := 8
 		skip := machoOffset / bs
 		count := (machoSize + bs - 1) / bs
-		fmt.Fprintf(&script, "    dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
-		script.WriteString("    exec \"$o\" \"$@\"\n")
+		fmt.Fprintf(&script, "  dd if=\"$o\" of=\"$o\" bs=%d skip=%d count=%d conv=notrunc 2>/dev/null\n", bs, skip, count)
+		script.WriteString("  exec \"$o\" \"$@\"\n")
 	} else {
-		script.WriteString("    echo 'APE: macOS x86_64 requires amd64 binary' >&2; exit 1\n")
+		script.WriteString("  echo 'APE: macOS requires amd64 binary' >&2; exit 1\n")
 	}
-	script.WriteString(`    ;;
-  arm64)
-    if command -v ape >/dev/null 2>&1; then
-      exec ape "$o" "$@"
-    fi
-    echo 'APE: Install APE loader: https://justine.lol/ape.html' >&2
-    exit 1
-    ;;
-  esac
-  ;;
+	script.WriteString(`  ;;
 FreeBSD*|OpenBSD*|NetBSD*)
   t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
   trap 'rm -f "$t"' EXIT
@@ -258,6 +248,9 @@ FreeBSD*|OpenBSD*|NetBSD*)
 	fmt.Fprintf(&script, "  tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
 	script.WriteString(`  chmod +x "$t"
   exec "$t" "$@"
+  ;;
+CYGWIN*|MINGW*|MSYS*)
+  exec cmd //c "$o" "$@"
   ;;
 esac
 exit 1
