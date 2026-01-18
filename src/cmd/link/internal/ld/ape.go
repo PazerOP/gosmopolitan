@@ -250,7 +250,13 @@ if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
   fi
 elif [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
   if [ -d /Applications ]; then
-    echo 'APE: macOS ARM64 requires Rosetta or native build' >&2; exit 1
+    # macOS ARM64: Extract x86_64 ELF and run via Rosetta
+    t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
+    trap 'rm -f "$t"' EXIT
+`)
+	fmt.Fprintf(&script, "    tail -c +%d \"$o\" > \"$t\"\n", elfOffset+1)
+	script.WriteString(`    chmod +x "$t"
+    exec "$t" "$@"
   else
     # Linux ARM64: Extract and run ELF
     t="${TMPDIR:-/tmp}/.ape.$$.$(id -u)"
