@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !cmd_go_bootstrap && unix && !cosmo
+//go:build !cmd_go_bootstrap && cosmo
 
 package telemetrystats
 
@@ -11,10 +11,9 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"cmd/internal/telemetry/counter"
-
-	"golang.org/x/sys/unix"
 )
 
 func incrementVersionCounters() {
@@ -26,16 +25,13 @@ func incrementVersionCounters() {
 		return string(nullterm[:end])
 	}
 
-	var v unix.Utsname
-	err := unix.Uname(&v)
+	var v syscall.Utsname
+	err := syscall.Uname(&v)
 	if err != nil {
 		counter.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-uname-error", runtime.GOOS))
 		return
 	}
-	major, minor, ok := majorMinor(convert(v.Release[:]))
-	if runtime.GOOS == "aix" {
-		major, minor, ok = convert(v.Version[:]), convert(v.Release[:]), true
-	}
+	major, minor, ok := majorMinorCosmo(convert(v.Release[:]))
 	if !ok {
 		counter.Inc(fmt.Sprintf("go/platform/host/%s/version:unknown-bad-format", runtime.GOOS))
 		return
@@ -44,7 +40,7 @@ func incrementVersionCounters() {
 	counter.Inc(fmt.Sprintf("go/platform/host/%s/version:%s-%s", runtime.GOOS, major, minor))
 }
 
-func majorMinor(v string) (string, string, bool) {
+func majorMinorCosmo(v string) (string, string, bool) {
 	firstDot := strings.Index(v, ".")
 	if firstDot < 0 {
 		return "", "", false

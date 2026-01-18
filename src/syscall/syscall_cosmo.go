@@ -510,3 +510,12 @@ func Shutdown(s int, how int) (err error) {
 	return shutdown(s, how)
 }
 
+func Listen(s int, backlog int) (err error) {
+	return listen(s, backlog)
+}
+
+const (
+	RUSAGE_SELF     = 0
+	RUSAGE_CHILDREN = -1
+)
+
