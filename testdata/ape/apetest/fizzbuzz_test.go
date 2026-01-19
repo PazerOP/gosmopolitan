@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -26,7 +27,23 @@ func copyBinary(t *testing.T) string {
 func runFizzbuzz(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
 	bin := copyBinary(t)
-	cmd := exec.Command(bin, args...)
+
+	// APE binaries need to be invoked through a shell on Linux/Unix because
+	// the kernel doesn't recognize the APE format directly. The shell will
+	// parse the APE header as a script and execute the bootstrap code.
+	// On Windows, the binary is recognized as a PE executable directly.
+	// On macOS, the binary may need shell execution for the dd bootstrap.
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		// Windows recognizes APE as PE directly
+		cmd = exec.Command(bin, args...)
+	default:
+		// Unix: invoke through shell for APE bootstrap
+		shellArgs := append([]string{bin}, args...)
+		cmd = exec.Command("/bin/sh", shellArgs...)
+	}
+
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
