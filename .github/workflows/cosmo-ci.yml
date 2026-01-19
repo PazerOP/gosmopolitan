@@ -31,8 +31,8 @@ jobs:
       - name: Build Go toolchain
         uses: wow-look-at-my-code/actions/multicmd@master
         with:
-          unix: cd src && ./make.bash
-          windows: cd src && .\make.bat
+          unix: cd src && ./make.bash -v
+          windows: cd src && .\make.bat -v
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
 
