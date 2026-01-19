@@ -1,6 +1,6 @@
 # CI workflow for GOOS=cosmo cross-platform testing
 # Tests that APE binaries built on any platform run on all platforms
-# Each test runner tests all 3 binaries (native + 2 cross-compiled)
+# Builds both AMD64 and ARM64 binaries for multi-architecture support
 
 name: Cosmopolitan Cross-Platform CI
 
@@ -9,12 +9,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Build Go toolchain and APE test binary on each build platform
+  # Build Go toolchain and APE test binaries on each build platform
   build:
     strategy:
       fail-fast: false
       matrix:
         build-os: [ubuntu-latest, macos-latest, windows-latest]
+        goarch: [amd64, arm64]
 
     runs-on: ${{ matrix.build-os }}
 
@@ -36,33 +37,44 @@ jobs:
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
 
-      - name: Build APE binary
+      - name: Build APE binary (${{ matrix.goarch }})
         shell: bash
         run: |
           export PATH="$PWD/bin:$PATH"
-          GOOS=cosmo GOARCH=amd64 go build -o fizzbuzz.com testdata/fizzbuzz/fizzbuzz.go
+          GOOS=cosmo GOARCH=${{ matrix.goarch }} go build -o fizzbuzz-${{ matrix.goarch }}.com testdata/fizzbuzz/fizzbuzz.go
           echo "=== APE Header ==="
-          head -c 200 fizzbuzz.com
+          head -c 200 fizzbuzz-${{ matrix.goarch }}.com
           echo ""
           echo "=== File info ==="
-          file fizzbuzz.com 2>/dev/null || true
-          ls -la fizzbuzz.com
+          file fizzbuzz-${{ matrix.goarch }}.com 2>/dev/null || true
+          ls -la fizzbuzz-${{ matrix.goarch }}.com
 
       - name: Upload APE binary
         uses: actions/upload-artifact@v4
         with:
-          name: ape-binary-${{ matrix.build-os }}
-          path: fizzbuzz.com
+          name: ape-binary-${{ matrix.build-os }}-${{ matrix.goarch }}
+          path: fizzbuzz-${{ matrix.goarch }}.com
           retention-days: 1
 
-  # Test all APE binaries on each platform using Go tests
-  # Each runner tests all 3 binaries sequentially (native + 2 cross-compiled)
+  # Test APE binaries on each platform
+  # - x86_64 platforms (Ubuntu, Windows): test amd64 binary
+  # - ARM64 platforms (macOS latest is ARM64): test arm64 binary
   test:
     needs: build
     strategy:
       fail-fast: false
       matrix:
         test-os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Ubuntu x86_64 tests amd64 binary
+          - test-os: ubuntu-latest
+            test-arch: amd64
+          # macOS (ARM64) tests arm64 binary
+          - test-os: macos-latest
+            test-arch: arm64
+          # Windows x86_64 tests amd64 binary
+          - test-os: windows-latest
+            test-arch: amd64
 
     runs-on: ${{ matrix.test-os }}
 
@@ -76,15 +88,16 @@ jobs:
           go-version: '1.24'
           cache: false
 
-      - name: Download all APE binaries
+      - name: Download all APE binaries for ${{ matrix.test-arch }}
         uses: actions/download-artifact@v4
         with:
+          pattern: ape-binary-*-${{ matrix.test-arch }}
           path: binaries
 
       - name: Make binaries executable
         uses: wow-look-at-my-code/actions/multicmd@master
         with:
-          unix: chmod +x binaries/ape-binary-*/fizzbuzz.com
+          unix: chmod +x binaries/ape-binary-*/fizzbuzz-*.com
 
       - name: Test binary built on Ubuntu
         id: test-ubuntu
@@ -93,7 +106,7 @@ jobs:
         shell: bash
         run: |
           cd testdata/ape/apetest
-          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-ubuntu-latest/fizzbuzz.com" go test -v ./...
+          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-ubuntu-latest-${{ matrix.test-arch }}/fizzbuzz-${{ matrix.test-arch }}.com" go test -v ./...
 
       - name: Test binary built on macOS
         id: test-macos
@@ -102,7 +115,7 @@ jobs:
         shell: bash
         run: |
           cd testdata/ape/apetest
-          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-macos-latest/fizzbuzz.com" go test -v ./...
+          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-macos-latest-${{ matrix.test-arch }}/fizzbuzz-${{ matrix.test-arch }}.com" go test -v ./...
 
       - name: Test binary built on Windows
         id: test-windows
@@ -111,7 +124,7 @@ jobs:
         shell: bash
         run: |
           cd testdata/ape/apetest
-          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-windows-latest/fizzbuzz.com" go test -v ./...
+          FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-windows-latest-${{ matrix.test-arch }}/fizzbuzz-${{ matrix.test-arch }}.com" go test -v ./...
 
       - name: Check test results
         if: steps.test-ubuntu.outcome == 'failure' || steps.test-macos.outcome == 'failure' || steps.test-windows.outcome == 'failure'

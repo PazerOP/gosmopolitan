@@ -1,180 +1,215 @@
-# Plan: ARM64 Darwin Syscall Routing Through Syslib
+# Plan: AMD64 Darwin Syscall Routing + Multi-Arch CI
 
 ## Problem Statement
 
-The `Syscall6` function in `src/internal/runtime/syscall/cosmo/asm_cosmo_arm64.s` always uses raw SVC instructions. On darwin ARM64, this crashes with SIGSYS because macOS doesn't allow raw syscalls - they must go through Apple's frameworks.
+1. **AMD64 binaries crash on macOS**: `sys_cosmo_amd64.s` uses raw `SYSCALL` instructions which crash with SIGSYS on macOS (both x86_64 and ARM64 via Rosetta)
+2. **CI only builds AMD64**: APE binaries should contain both AMD64 and ARM64 code to run natively on all platforms
 
-**Symptom**: Programs using `fmt.Println()` or `os.Stdout.Write()` crash silently on macOS ARM64 because they use the syscall package which calls `Syscall6`.
+## Part 1: AMD64 Darwin Syscall Routing
 
-## Current Architecture
+### Files to Modify
 
-### What Works (runtime syscalls)
-`src/runtime/sys_cosmo_arm64.s` already implements dual-path routing:
-```asm
-#define CHECK_DARWIN(label) \
-    MOVW    runtime·__hostos(SB), R9; \
-    CMPW    $HOSTXNU, R9; \
-    BEQ     label
+1. **`src/runtime/rt0_cosmo_amd64.s`** - Capture `__hostos` and `__syslib` from APE loader
+2. **`src/runtime/os_cosmo_amd64.go`** - Add `__hostos`/`__syslib` variables
+3. **`src/runtime/sys_cosmo_amd64.s`** - Add darwin branches to all syscalls
+4. **`src/internal/runtime/syscall/cosmo/asm_cosmo_amd64.s`** - Add darwin dispatch to Syscall6
 
-TEXT runtime·write(SB),NOSPLIT,$0
-    CHECK_DARWIN(write_darwin)
-    // Linux: SVC
-    SVC
-    RET
-write_darwin:
-    // Darwin: call syslib function
-    MOVD    runtime·__syslib(SB), R9
-    MOVD    256(R9), R12    // write at offset 256
-    BL      (R12)
-    RET
-```
+### x86_64 C ABI (differs from ARM64)
 
-### What's Broken (syscall package)
-`src/internal/runtime/syscall/cosmo/asm_cosmo_arm64.s`:
-```asm
-TEXT ·Syscall6(SB),NOSPLIT,$0-80
-    MOVD    num+0(FP), R8
-    // ...load args...
-    SVC                     // <-- CRASHES ON DARWIN!
-```
+- Arguments: RDI, RSI, RDX, RCX, R8, R9 (first 6 args)
+- Return value: RAX
+- Caller-saved: RAX, RCX, RDX, RSI, RDI, R8-R11
+- Stack must be 16-byte aligned before CALL
 
-## Solution Design
+### AMD64 CHECK_DARWIN Macro
 
-### Approach: Syscall Number → Syslib Dispatch Table
-
-Modify `Syscall6` to:
-1. Check `runtime·__hostos` for darwin
-2. On Linux: use raw SVC (current behavior)
-3. On Darwin: look up syscall number in a dispatch table, call the corresponding syslib function
-
-### Syscall Mapping Table
-
-| Syscall | Linux ARM64 Number | Syslib Offset |
-|---------|-------------------|---------------|
-| write | 64 | 256 |
-| read | 63 | 264 |
-| openat | 56 | 248 |
-| close | 57 | 232 |
-| mmap | 222 | 40 |
-| munmap | 215 | 240 |
-| mprotect | 226 | 288 |
-| exit | 93 | 224 |
-| nanosleep | 101 | 32 |
-| clock_gettime | 113 | 24 |
-| sigaction | 134 | 272 |
-| sigaltstack | 132 | 296 |
-| pselect6 | 72 | 280 |
-
-### Implementation Strategy
-
-**Option A: Jump Table (Complex)**
-- Create a lookup table mapping syscall numbers to syslib offsets
-- Requires bounds checking and indirect jumps
-- More complex but handles all syscalls
-
-**Option B: Switch Statement (Simpler)**
-- Handle known syscalls with direct comparisons
-- Fall back to returning ENOSYS for unknown syscalls
-- Simpler, easier to debug
-
-**Recommended: Option B** - Start with explicit handling of the most critical syscalls (write, read, close, openat, mmap, munmap, mprotect, exit) and return ENOSYS for others. Can expand as needed.
-
-## Files to Modify
-
-1. **`src/internal/runtime/syscall/cosmo/asm_cosmo_arm64.s`**
-   - Add darwin detection using `CHECK_DARWIN` pattern
-   - Add switch/dispatch for known syscalls on darwin
-   - Call syslib functions with proper C ABI (stack alignment)
-
-2. **`src/internal/runtime/syscall/cosmo/defs_cosmo_arm64.go`** (may need to create)
-   - Define syslib offset constants for clarity
-
-## Implementation Steps
-
-### Step 1: Add Darwin Detection
 ```asm
 #define HOSTXNU $8
 
 #define CHECK_DARWIN(label) \
-    MOVW    runtime·__hostos(SB), R9; \
-    CMPW    HOSTXNU, R9; \
-    BEQ     label
+    MOVL    runtime·__hostos(SB), AX; \
+    CMPL    $HOSTXNU, AX; \
+    JEQ     label
 ```
 
-### Step 2: Modify Syscall6 Entry
+### Syscall Mapping (Linux x86_64 → Syslib Offset)
+
+| Syscall | Linux Number | Syslib Offset |
+|---------|-------------|---------------|
+| read | 0 | 264 |
+| write | 1 | 256 |
+| close | 3 | 232 |
+| mmap | 9 | 40 |
+| munmap | 11 | 240 |
+| nanosleep | 35 | 32 |
+| clock_gettime | 228 | 24 |
+| exit_group | 231 | 224 |
+| openat | 257 | 248 |
+| sigaltstack | 131 | 296 |
+| rt_sigaction | 13 | 272 |
+| mprotect | 10 | 288 |
+
+### Implementation Steps
+
+#### Step 1: Add __hostos/__syslib to os_cosmo_amd64.go
+
+```go
+var (
+    __hostos uint32
+    __syslib uintptr
+)
+```
+
+#### Step 2: Update rt0_cosmo_amd64.s
+
+**Current state**: AMD64 rt0 just does `JMP _rt0_amd64(SB)` - no capture at all!
+
+**ARM64 reference**: APE loader (ape-m1.c) passes:
+- X3 = host OS indicator (8 = XNU/macOS)
+- X15 = Syslib pointer
+
+**AMD64 needs**: Research x86_64 APE loader (ape.S or similar) to find:
+- Which register contains hostos on x86_64
+- Which register contains syslib pointer on x86_64
+
+Then add:
+```asm
+DATA runtime·__hostos+0(SB)/4, $0
+GLOBL runtime·__hostos(SB), NOPTR, $4
+
+DATA runtime·__syslib+0(SB)/8, $0
+GLOBL runtime·__syslib(SB), NOPTR, $8
+
+TEXT _rt0_amd64_cosmo(SB),NOSPLIT,$-8
+    // Capture APE loader values (registers TBD from Cosmopolitan source)
+    MOVL    <hostos_reg>, runtime·__hostos(SB)
+    MOVQ    <syslib_reg>, runtime·__syslib(SB)
+    JMP     _rt0_amd64(SB)
+```
+
+#### Step 3: Update sys_cosmo_amd64.s
+
+Add darwin branches to each syscall. Example for write:
+
+```asm
+TEXT runtime·write1(SB),NOSPLIT,$0-28
+    CHECK_DARWIN(write1_darwin)
+    // Linux path (existing)
+    MOVQ    fd+0(FP), DI
+    MOVQ    p+8(FP), SI
+    MOVL    n+16(FP), DX
+    MOVL    $SYS_write, AX
+    SYSCALL
+    MOVL    AX, ret+24(FP)
+    RET
+
+write1_darwin:
+    MOVQ    runtime·__syslib(SB), R9
+    MOVQ    256(R9), AX              // syslib.write
+    MOVQ    fd+0(FP), DI
+    MOVQ    p+8(FP), SI
+    MOVL    n+16(FP), DX
+    SUBQ    $8, SP                   // Align stack
+    CALL    AX
+    ADDQ    $8, SP
+    MOVL    AX, ret+24(FP)
+    RET
+```
+
+#### Step 4: Update asm_cosmo_amd64.s (Syscall6)
+
+Add darwin dispatch similar to ARM64:
+
 ```asm
 TEXT ·Syscall6(SB),NOSPLIT,$0-80
     CHECK_DARWIN(syscall6_darwin)
-    // Linux path (existing code)
-    MOVD    num+0(FP), R8
-    MOVD    a1+8(FP), R0
-    // ...
-    SVC
-    // ...
-    RET
+    // Linux path (existing SYSCALL)
+    ...
 
 syscall6_darwin:
-    // Darwin dispatch - see Step 3
-```
+    MOVQ    num+0(FP), R11          // syscall number
+    MOVQ    runtime·__syslib(SB), R10
 
-### Step 3: Darwin Syscall Dispatch
-```asm
-syscall6_darwin:
-    MOVD    num+0(FP), R8           // syscall number
-    MOVD    runtime·__syslib(SB), R10
-
-    // Load arguments for C call
-    MOVD    a1+8(FP), R0
-    MOVD    a2+16(FP), R1
-    MOVD    a3+24(FP), R2
-    MOVD    a4+32(FP), R3
-    MOVD    a5+40(FP), R4
-    MOVD    a6+48(FP), R5
+    // Load arguments for C call (x86_64 ABI)
+    MOVQ    a1+8(FP), DI
+    MOVQ    a2+16(FP), SI
+    MOVQ    a3+24(FP), DX
+    MOVQ    a4+32(FP), CX
+    MOVQ    a5+40(FP), R8
+    MOVQ    a6+48(FP), R9
 
     // Dispatch based on syscall number
-    CMPW    $64, R8                 // SYS_write
-    BEQ     darwin_write
-    CMPW    $63, R8                 // SYS_read
-    BEQ     darwin_read
-    CMPW    $57, R8                 // SYS_close
-    BEQ     darwin_close
-    CMPW    $56, R8                 // SYS_openat
-    BEQ     darwin_openat
+    CMPL    $1, R11                 // SYS_write
+    JEQ     darwin_write
+    CMPL    $0, R11                 // SYS_read
+    JEQ     darwin_read
     // ... more syscalls ...
 
-    // Unknown syscall - return ENOSYS
-    MOVD    $-38, R0                // -ENOSYS
-    MOVD    R0, r1+56(FP)
-    MOVD    $38, R0                 // ENOSYS
-    MOVD    R0, errno+72(FP)
+    // Unknown - return ENOSYS
+    MOVQ    $-1, r1+56(FP)
+    MOVQ    $38, errno+72(FP)       // ENOSYS
     RET
 
 darwin_write:
-    MOVD    256(R10), R12           // syslib.write offset
-    B       darwin_call
+    MOVQ    256(R10), AX
+    JMP     darwin_call
 darwin_read:
-    MOVD    264(R10), R12           // syslib.read offset
-    B       darwin_call
-// ... etc ...
+    MOVQ    264(R10), AX
+    JMP     darwin_call
 
 darwin_call:
-    SUB     $16, RSP                // Align stack for C ABI
-    BL      (R12)
-    ADD     $16, RSP
-    // Handle return value (R0 = result, negative = error)
-    CMP     $0, R0
-    BGE     darwin_success
-    NEG     R0, R0                  // Make errno positive
-    MOVD    $-1, R1
-    MOVD    R1, r1+56(FP)
-    MOVD    R0, errno+72(FP)
+    SUBQ    $8, SP                  // Align stack
+    CALL    AX
+    ADDQ    $8, SP
+    // Handle return
+    CMPQ    AX, $-4095
+    JCC     darwin_success
+    NEGQ    AX
+    MOVQ    $-1, r1+56(FP)
+    MOVQ    AX, errno+72(FP)
     RET
 darwin_success:
-    MOVD    R0, r1+56(FP)
-    MOVD    $0, R1
-    MOVD    R1, errno+72(FP)
+    MOVQ    AX, r1+56(FP)
+    MOVQ    $0, errno+72(FP)
     RET
 ```
+
+## Part 2: Multi-Architecture CI
+
+### Current State
+- CI builds `GOARCH=amd64` only
+- Tests fail on macOS because AMD64 binaries use raw SYSCALL
+
+### Target State
+- Build both AMD64 and ARM64 binaries
+- Test each binary on appropriate platforms
+- Eventually: merge into fat APE binary with `apelink`
+
+### CI Changes (`.github/workflows/cosmo-ci.yml`)
+
+Update build matrix to include both architectures:
+
+```yaml
+build:
+  strategy:
+    matrix:
+      build-os: [ubuntu-latest, macos-latest, windows-latest]
+      goarch: [amd64, arm64]
+```
+
+Build step:
+```yaml
+- name: Build APE binary
+  shell: bash
+  run: |
+    export PATH="$PWD/bin:$PATH"
+    GOOS=cosmo GOARCH=${{ matrix.goarch }} go build -o fizzbuzz-${{ matrix.goarch }}.com testdata/fizzbuzz/fizzbuzz.go
+```
+
+Test step - run appropriate binary per test platform:
+- Ubuntu (x86_64): test amd64 binary
+- macOS (ARM64): test arm64 binary
+- Windows (x86_64): test amd64 binary
 
 ## Verification
 
@@ -182,16 +217,22 @@ darwin_success:
 just build && just test
 ```
 
-Push and verify CI passes on all platforms.
+Push and verify CI passes:
+- AMD64 binary works on Linux and Windows
+- AMD64 binary works on macOS x86_64 (after darwin routing)
+- ARM64 binary works on macOS ARM64 (already has darwin routing)
+
+## Implementation Order
+
+1. Add `__hostos`/`__syslib` variables to `os_cosmo_amd64.go`
+2. Update `rt0_cosmo_amd64.s` to capture APE loader values
+3. Add CHECK_DARWIN to `sys_cosmo_amd64.s` for core syscalls (write, read, exit, mmap, etc.)
+4. Add darwin dispatch to `asm_cosmo_amd64.s` Syscall6
+5. Test locally on macOS x86_64 if available
+6. Update CI to build both architectures
+7. Push and verify CI
 
 ## Risk Assessment
 
-- **Low Risk**: Linux path unchanged, just adds darwin branch
-- **Medium Risk**: Need to ensure all critical syscalls are mapped
-- **Mitigation**: Unknown syscalls return ENOSYS with clear error, not crash
-
-## Future Enhancements
-
-- Add more syscalls to the dispatch table as needed
-- Consider generating the dispatch table from syslib struct definition
-- Add fcntl, ioctl, and other complex syscalls
+- **Medium Risk**: x86_64 APE loader register conventions need verification
+- **Mitigation**: Reference ARM64 implementation and Cosmopolitan source (ape.S, ape-m1.c)

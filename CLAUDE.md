@@ -10,6 +10,22 @@ When there's a specification, **follow the specification**. Never ask "should I 
 
 This is a fork of the Go programming language toolchain that adds support for **Cosmopolitan Libc** (`GOOS=cosmo`). Cosmopolitan enables building "Actually Portable Executables" (APE) - single binaries that run natively on Linux, macOS, and Windows without modification.
 
+## No Rosetta Dependency
+
+**APE binaries run natively on all platforms without emulation.** This is not a goal or theory - it's proven, working technology. Real APE executables (like `vim.com` from Cosmopolitan) already run natively on x86_64 Linux, x86_64 macOS, ARM64 macOS, and Windows today without Rosetta.
+
+- APE binaries contain native code for multiple architectures (AMD64 + ARM64)
+- On ARM64 macOS, APE runs native ARM64 code - NOT x86_64 via Rosetta
+- The cosmocc toolchain doesn't need Rosetta, neither do we
+- If something "works via Rosetta", that's not actually working - it's a bug
+
+When building/testing:
+- `GOARCH=amd64` produces x86_64 code only - will NOT work natively on ARM64 macOS
+- Full APE support requires both AMD64 and ARM64 code paths
+- Runtime must detect host OS/arch and use appropriate syscall method
+
+**macOS syscall restriction**: macOS (both x86_64 and ARM64) does not allow raw syscalls. All syscalls must go through Apple's frameworks via the `syslib` function pointer table. Code that uses raw `SYSCALL`/`SVC` instructions will crash with SIGSYS on macOS.
+
 ## Build Commands
 
 Build from the `src/` directory. Requires a Go 1.24+ bootstrap toolchain (set `GOROOT_BOOTSTRAP` or have `go` in PATH).
