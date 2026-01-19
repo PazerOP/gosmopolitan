@@ -32,7 +32,7 @@ jobs:
         uses: wow-look-at-my-code/actions/multicmd@master
         with:
           unix: cd src && ./make.bash
-          windows: cd src && make.bat
+          windows: cd src && .\make.bat
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
 
