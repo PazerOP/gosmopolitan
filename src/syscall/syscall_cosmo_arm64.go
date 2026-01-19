@@ -181,3 +181,44 @@ func sendmsgN(fd int, p, oob []byte, ptr unsafe.Pointer, salen _Socklen, flags i
 	}
 	return n, nil
 }
+
+// ARM64 Linux doesn't have the legacy stat/lstat/utimes/futimesat syscalls.
+// These are wrappers that use the "at" variants available on ARM64.
+
+func Stat(path string, stat *Stat_t) (err error) {
+	return fstatat(_AT_FDCWD, path, stat, 0)
+}
+
+func Lstat(path string, stat *Stat_t) (err error) {
+	return fstatat(_AT_FDCWD, path, stat, _AT_SYMLINK_NOFOLLOW)
+}
+
+func futimesat(dirfd int, path string, tv *[2]Timeval) (err error) {
+	if tv == nil {
+		return utimensat(dirfd, path, nil, 0)
+	}
+
+	ts := []Timespec{
+		NsecToTimespec(TimevalToNsec(tv[0])),
+		NsecToTimespec(TimevalToNsec(tv[1])),
+	}
+	return utimensat(dirfd, path, (*[2]Timespec)(unsafe.Pointer(&ts[0])), 0)
+}
+
+func utimes(path string, tv *[2]Timeval) (err error) {
+	if tv == nil {
+		return utimensat(_AT_FDCWD, path, nil, 0)
+	}
+
+	ts := []Timespec{
+		NsecToTimespec(TimevalToNsec(tv[0])),
+		NsecToTimespec(TimevalToNsec(tv[1])),
+	}
+	return utimensat(_AT_FDCWD, path, (*[2]Timespec)(unsafe.Pointer(&ts[0])), 0)
+}
+
+// ARM64 Linux doesn't have SYS_GETPGRP, use Getpgid(0) instead.
+func Getpgrp() (pid int) {
+	pid, _ = Getpgid(0)
+	return
+}

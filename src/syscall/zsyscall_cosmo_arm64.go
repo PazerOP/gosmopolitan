@@ -269,31 +269,8 @@ func fstatat(dirfd int, path string, stat *Stat_t, flags int) (err error) {
 	return
 }
 
-func Lstat(path string, stat *Stat_t) (err error) {
-	var _p0 *byte
-	_p0, err = BytePtrFromString(path)
-	if err != nil {
-		return
-	}
-	_, _, e1 := Syscall(SYS_LSTAT, uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(stat)), 0)
-	if e1 != 0 {
-		err = errnoErr(e1)
-	}
-	return
-}
-
-func Stat(path string, stat *Stat_t) (err error) {
-	var _p0 *byte
-	_p0, err = BytePtrFromString(path)
-	if err != nil {
-		return
-	}
-	_, _, e1 := Syscall(SYS_STAT, uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(stat)), 0)
-	if e1 != 0 {
-		err = errnoErr(e1)
-	}
-	return
-}
+// Lstat and Stat are implemented in syscall_cosmo_arm64.go using fstatat
+// since ARM64 Linux doesn't have SYS_LSTAT/SYS_STAT syscalls.
 
 func getgroups(n int, list *_Gid_t) (nn int, err error) {
 	r0, _, e1 := RawSyscall(SYS_GETGROUPS, uintptr(n), uintptr(unsafe.Pointer(list)), 0)
@@ -312,31 +289,8 @@ func setgroups(n int, list *_Gid_t) (err error) {
 	return
 }
 
-func utimes(path string, times *[2]Timeval) (err error) {
-	var _p0 *byte
-	_p0, err = BytePtrFromString(path)
-	if err != nil {
-		return
-	}
-	_, _, e1 := Syscall(SYS_UTIMES, uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(times)), 0)
-	if e1 != 0 {
-		err = errnoErr(e1)
-	}
-	return
-}
-
-func futimesat(dirfd int, path string, times *[2]Timeval) (err error) {
-	var _p0 *byte
-	_p0, err = BytePtrFromString(path)
-	if err != nil {
-		return
-	}
-	_, _, e1 := Syscall(SYS_FUTIMESAT, uintptr(dirfd), uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(times)))
-	if e1 != 0 {
-		err = errnoErr(e1)
-	}
-	return
-}
+// utimes and futimesat are implemented in syscall_cosmo_arm64.go using utimensat
+// since ARM64 Linux doesn't have SYS_UTIMES/SYS_FUTIMESAT syscalls.
 
 func gettimeofday(tv *Timeval, tz *byte) (err error) {
 	_, _, e1 := RawSyscall(SYS_GETTIMEOFDAY, uintptr(unsafe.Pointer(tv)), uintptr(unsafe.Pointer(tz)), 0)
@@ -528,11 +482,8 @@ func Getpgid(pid int) (pgid int, err error) {
 	return
 }
 
-func Getpgrp() (pid int) {
-	r0, _ := rawSyscallNoError(SYS_GETPGRP, 0, 0, 0)
-	pid = int(r0)
-	return
-}
+// Getpgrp is implemented in syscall_cosmo_arm64.go using Getpgid(0)
+// since ARM64 Linux doesn't have SYS_GETPGRP syscall.
 
 func Kill(pid int, sig Signal) (err error) {
 	_, _, e1 := RawSyscall(SYS_KILL, uintptr(pid), uintptr(sig), 0)
