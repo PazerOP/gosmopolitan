@@ -28,20 +28,11 @@ jobs:
           go-version: '1.24'
           cache: false
 
-      - name: Build Go toolchain (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd src
-          ./make.bash
-        env:
-          GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
-
-      - name: Build Go toolchain (Windows)
-        if: runner.os == 'Windows'
-        shell: cmd
-        run: |
-          cd src
-          make.bat
+      - name: Build Go toolchain
+        uses: wow-look-at-my-code/actions/multicmd@master
+        with:
+          unix: cd src && ./make.bash -v
+          windows: cd src && .\make.bat -v
         env:
           GOROOT_BOOTSTRAP: ${{ env.GOROOT }}
 
@@ -91,8 +82,9 @@ jobs:
           path: binaries
 
       - name: Make binaries executable
-        if: runner.os != 'Windows'
-        run: chmod +x binaries/ape-binary-*/fizzbuzz.com
+        uses: wow-look-at-my-code/actions/multicmd@master
+        with:
+          unix: chmod +x binaries/ape-binary-*/fizzbuzz.com
 
       - name: Test binary built on Ubuntu
         id: test-ubuntu
