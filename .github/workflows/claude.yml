@@ -46,12 +46,6 @@ jobs:
           claude_args: '--model claude-opus-4-5'
           use_sticky_comment: true
 
-          # Allow re-review on push even if Claude has already commented
-          prompt: |
-            When reviewing PRs, always perform a fresh review of the current code state.
-            Do not skip review just because Claude has previously commented on this PR.
-            Each push should get a new review of the changes.
-
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
