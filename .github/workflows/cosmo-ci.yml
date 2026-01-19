@@ -89,7 +89,7 @@ jobs:
       - name: Test binary built on Ubuntu
         id: test-ubuntu
         timeout-minutes: 1
-        continue-on-error: true
+        if: always()
         shell: bash
         run: |
           cd testdata/ape/apetest
@@ -98,7 +98,7 @@ jobs:
       - name: Test binary built on macOS
         id: test-macos
         timeout-minutes: 1
-        continue-on-error: true
+        if: always()
         shell: bash
         run: |
           cd testdata/ape/apetest
@@ -107,17 +107,8 @@ jobs:
       - name: Test binary built on Windows
         id: test-windows
         timeout-minutes: 1
-        continue-on-error: true
+        if: always()
         shell: bash
         run: |
           cd testdata/ape/apetest
           FIZZBUZZ_BIN="$GITHUB_WORKSPACE/binaries/ape-binary-windows-latest/fizzbuzz.com" go test -v ./...
-
-      - name: Check test results
-        if: steps.test-ubuntu.outcome == 'failure' || steps.test-macos.outcome == 'failure' || steps.test-windows.outcome == 'failure'
-        run: |
-          echo "One or more tests failed:"
-          echo "  Ubuntu binary: ${{ steps.test-ubuntu.outcome }}"
-          echo "  macOS binary: ${{ steps.test-macos.outcome }}"
-          echo "  Windows binary: ${{ steps.test-windows.outcome }}"
-          exit 1
