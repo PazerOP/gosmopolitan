@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           export PATH="$PWD/bin:$PATH"
-          GOOS=cosmo GOARCH=amd64 go build -o fizzbuzz.com testdata/fizzbuzz/fizzbuzz.go
+          GOOS=cosmo go build -o fizzbuzz.com testdata/fizzbuzz/fizzbuzz.go
           echo "=== APE Header ==="
           head -c 200 fizzbuzz.com
           echo ""
