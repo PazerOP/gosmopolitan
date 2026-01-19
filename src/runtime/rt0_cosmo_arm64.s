@@ -6,19 +6,75 @@
 
 #include "textflag.h"
 
+// The APE loader (ape-m1.c) passes the following when jumping to the entry point:
+//   X0  = stack pointer (not used, SP is already set)
+//   X2  = path to executable
+//   X3  = host OS indicator (8 = XNU/macOS, 0 = Linux, etc.)
+//   X15 = Syslib pointer (Apple APIs for macOS)
+//   X16 = entry point (used for the jump, not relevant here)
+//
+// We need to save X3 and X15 before calling the Go runtime.
+
+DATA runtime·__hostos+0(SB)/4, $0
+GLOBL runtime·__hostos(SB), NOPTR, $4
+
+DATA runtime·__syslib+0(SB)/8, $0
+GLOBL runtime·__syslib(SB), NOPTR, $8
+
 TEXT _rt0_arm64_cosmo(SB),NOSPLIT|NOFRAME,$0
-	MOV	0(RSP), R0	// argc
-	ADD	$8, RSP, R1	// argv
-	BL	main(SB)
+	// Entry point for Cosmopolitan ARM64 binaries
+	// The APE loader (ape-m1.c) passes:
+	//   X0  = stack pointer (not used, SP is already set)
+	//   X2  = path to executable
+	//   X3  = host OS indicator (8 = XNU/macOS, 0 = Linux, etc.)
+	//   X15 = Syslib pointer (Apple APIs for macOS)
+	//
+	// Save host OS and Syslib pointer for runtime use
+	MOVW	R3, runtime·__hostos(SB)
+	MOVD	R15, runtime·__syslib(SB)
+
+	// DEBUG: Verify R3 is 8 (XNU) and R15 is valid
+	// Check host OS
+	CMP	$8, R3
+	BNE	debug_not_xnu
+
+	// Check Syslib magic
+	MOVW	(R15), R9
+	MOVW	$0x62696c73, R10
+	CMP	R9, R10
+	BNE	debug_bad_syslib
+
+	// All good - continue
+	B	cosmo_init_ok
+
+debug_not_xnu:
+	// R3 is not 8 - print and exit
+	MOVD	$81, R0   // exit code 81 = not XNU
+	MOVD	runtime·__syslib(SB), R9
+	CMP	$0, R9
+	BEQ	debug_no_exit
+	MOVD	224(R9), R12
+	MOVD	RSP, R11
+	AND	$~15, R11, R11
+	MOVD	R11, RSP
+	BL	(R12)
+debug_no_exit:
+	WORD	$0xd4200000  // BRK
+
+debug_bad_syslib:
+	MOVD	$82, R0   // exit code 82 = bad syslib
+	WORD	$0xd4200000  // BRK
+
+cosmo_init_ok:
+	// Ensure stack is 16-byte aligned (required by ARM64 ABI)
+	MOVD	RSP, R0
+	AND	$~15, R0, RSP
+
+	// Proceed to standard Go ARM64 runtime entry
+	JMP	_rt0_arm64(SB)
 
 TEXT _rt0_arm64_cosmo_lib(SB),NOSPLIT,$0
-	B	_rt0_arm64_lib(SB)
-
-TEXT main(SB),NOSPLIT|NOFRAME,$0
-	MOVD	$runtime·rt0_go(SB), R2
-	BL	(R2)
-exit:
-	MOVD	$0, R0
-	MOVD	$94, R8	// SYS_exit_group
-	SVC
-	B	exit
+	// For shared library builds, also save the Syslib info
+	MOVW	R3, runtime·__hostos(SB)
+	MOVD	R15, runtime·__syslib(SB)
+	JMP	_rt0_arm64_lib(SB)

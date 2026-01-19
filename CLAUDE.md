@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Don't Ask Stupid Questions
+
+When there's a specification, **follow the specification**. Never ask "should I follow the spec or do something different?" - the answer is always follow the spec. That's what specs are for. If the implementation doesn't match the spec, fix the implementation.
+
 ## Project Overview
 
 This is a fork of the Go programming language toolchain that adds support for **Cosmopolitan Libc** (`GOOS=cosmo`). Cosmopolitan enables building "Actually Portable Executables" (APE) - single binaries that run natively on Linux, macOS, and Windows without modification.
@@ -99,3 +103,68 @@ go tool compile -bench=out.txt file.go
 ## CI
 
 The GitHub Actions workflow (`.github/workflows/cosmo-ci.yml`) builds the toolchain and tests that APE binaries built on any platform (Linux/macOS/Windows) run correctly on all other platforms.
+
+## Adding Cosmo Support to Standard Library Packages
+
+When a stdlib package fails to build for `GOOS=cosmo`, follow these steps:
+
+### 1. Identify Build Constraint Types
+
+Go uses two types of build constraints:
+- **`//go:build` directives** - Add `cosmo` to the constraint (e.g., `//go:build cosmo || linux || ...`)
+- **Filename suffixes** - Files like `foo_linux.go` only build for Linux. Create `foo_cosmo.go` with equivalent functionality.
+
+### 2. Check What Cosmo Already Has
+
+Before creating new files, check existing cosmo implementations:
+```bash
+ls src/**/\*cosmo\*.go
+grep -r "//go:build.*cosmo" src/
+```
+
+### 3. Runtime Platform Handling
+
+Cosmopolitan binaries run on Linux, macOS, AND Windows at runtime. When creating `_cosmo.go` files:
+- Don't assume Linux-only features like `/proc` are available
+- Cosmopolitan Libc translates Linux syscalls to native OS calls at runtime
+- Test assumptions about what works on each platform
+
+### 4. Syscall Wrappers
+
+The `syscall` package uses `//sys` comments to generate wrappers. Check:
+- `src/syscall/syscall_cosmo.go` - main syscall implementations
+- `src/syscall/zsyscall_cosmo_amd64.go` - generated syscall stubs
+
+If a function like `Listen` is defined as lowercase `listen` but callers expect uppercase `Listen`, add a wrapper:
+```go
+func Listen(s int, backlog int) (err error) {
+    return listen(s, backlog)
+}
+```
+
+### 5. Common Patterns
+
+When adding cosmo to an existing `//go:build` constraint, use alphabetical order:
+```go
+//go:build cosmo || dragonfly || freebsd || linux  // cosmo first alphabetically
+```
+
+For filename-based constraints, create new files rather than modifying the build system.
+
+## Debugging ARM64 Cosmo
+
+**Keep `DEBUGGING.md` updated** when working on ARM64 cosmo support. Log:
+- What you've tried (with debug exit codes used)
+- What worked vs what failed
+- Current hypothesis and next steps
+
+This prevents going in circles and losing context across sessions.
+
+## APE Binary Reference
+
+**GOAL: Make our APE binaries work exactly like `~/Downloads/vim.com`**
+
+The vim.com binary is a working APE that runs on macOS ARM64. When fixing APE generation:
+1. Compare our output to vim.com's shell header structure
+2. Match vim.com's macOS ARM64 handling (embedded APE loader, cc compilation)
+3. Don't invent new approaches - copy what works in vim.com
