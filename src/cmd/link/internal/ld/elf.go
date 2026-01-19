@@ -198,9 +198,10 @@ func Elfinit(ctxt *Link) {
 		// Cosmopolitan: Set EF_APE_MODERN flag for modern APE binary support
 		// This tells the APE loader that this binary uses the modern format
 		// and should not have argv[0] modified.
-		if ctxt.HeadType == objabi.Hcosmo && ctxt.Arch.Family == sys.ARM64 {
-			ehdr.Flags = 0x0101ca75 // EF_APE_MODERN
-		}
+		// DISABLED: Testing if non-modern path fixes argv[0] issue
+		// if ctxt.HeadType == objabi.Hcosmo && ctxt.Arch.Family == sys.ARM64 {
+		// 	ehdr.Flags = 0x0101ca75 // EF_APE_MODERN
+		// }
 		elf64 = true
 
 		ehdr.Phoff = ELF64HDRSIZE      // Must be ELF64HDRSIZE: first PHdr must follow ELF header

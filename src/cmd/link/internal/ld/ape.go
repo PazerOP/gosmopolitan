@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"compress/gzip"
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // APE (Actually Portable Executable) format implementation
@@ -159,6 +161,19 @@ func makeAPEHeader(elfData []byte, elfEntry, elfPhoff uint64, elfPhnum uint16, a
 		machoSize = len(machoHeader)
 	}
 
+	// Load and compress APE loader source for macOS ARM64
+	var apeLoaderGz []byte
+	var apeLoaderOffset, apeLoaderSize int
+	if arch == sys.ARM64 {
+		apeLoaderGz = getApeLoaderSource()
+		if len(apeLoaderGz) > 0 {
+			// Place gzipped loader at offset 0x8000 (32KB into header)
+			// This leaves room for script (0x400-0x8000) and avoids conflicts
+			apeLoaderOffset = 0x8000
+			apeLoaderSize = len(apeLoaderGz)
+		}
+	}
+
 	// === Build the APE header with shell script ===
 	//
 	// The APE format is a polyglot that must satisfy:
@@ -283,18 +298,38 @@ fi
 `)
 	} else if arch == sys.ARM64 {
 		// ARM64 binary: runs on ARM64 systems
+		// Must handle both Linux ARM64 and macOS ARM64 (Apple Silicon)
+		// macOS cannot execute ELF directly - needs compiled APE loader
 		script.WriteString(`if [ "$m" = x86_64 ] || [ "$m" = amd64 ]; then
   echo 'APE: x86_64 cannot run ARM64 binary' >&2
   exit 1
 fi
+o="$(command -v "$0")"
+t="${TMPDIR:-${HOME:-.}}/.ape-1.10"
 if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
-  # Check for APE loader first
-  t="${TMPDIR:-${HOME:-.}}/.ape-1.10"
-  [ -x "$t" ] && exec "$t" "$0" "$@"
-  # Transform and run
-  o="$(command -v "$0")"
-  exec 7<> "$o" || exit 121
-  printf '`)
+  if [ -d /Applications ]; then
+    # macOS ARM64: use compiled Mach-O loader or compile from source
+    # Don't use existing loader if it might be ELF (from Linux)
+    if [ -x "$t" ] && file "$t" 2>/dev/null | grep -q "Mach-O"; then
+      exec "$t" "$o" "$@"
+    fi
+    # Compile APE loader from embedded source
+    if ! type cc >/dev/null 2>&1; then
+      echo "$0: please run: xcode-select --install" >&2
+      exit 1
+    fi
+    mkdir -p "${t%/*}" || exit
+    dd if="$o" bs=1 skip=APE_LOADER_OFFSET count=APE_LOADER_SIZE 2>/dev/null | gzip -dc >"$t.c.$$" || exit
+    mv -f "$t.c.$$" "$t.c" || exit
+    cc -w -O -o "$t.$$" "$t.c" || exit
+    mv -f "$t.$$" "$t" || exit
+    exec "$t" "$o" "$@"
+  else
+    # Linux ARM64: check for loader, or transform ELF header
+    type ape >/dev/null 2>&1 && exec ape "$o" "$@"
+    [ -x "$t" ] && exec "$t" "$o" "$@"
+    exec 7<> "$o" || exit 121
+    printf '`)
 		for _, b := range embeddedElf {
 			if b == '\'' {
 				script.WriteString("'\\''")
@@ -305,8 +340,9 @@ if [ "$m" = aarch64 ] || [ "$m" = arm64 ]; then
 			}
 		}
 		script.WriteString("' >&7\n")
-		script.WriteString("  exec 7<&-\n")
-		script.WriteString(`  exec "$0" "$@"
+		script.WriteString(`    exec 7<&-
+    exec "$0" "$@"
+  fi
 fi
 `)
 	}
@@ -321,12 +357,32 @@ exit 1
 
 	scriptBytes := script.Bytes()
 
+	// Replace APE loader offset/size placeholders for ARM64
+	if arch == sys.ARM64 && apeLoaderSize > 0 {
+		// Calculate actual file offset (APE header offset + offset within header)
+		actualOffset := apeLoaderOffset
+		scriptStr := string(scriptBytes)
+		scriptStr = bytes.NewBuffer(nil).String() // Reset
+		scriptStr = string(scriptBytes)
+		scriptStr = replaceAll(scriptStr, "APE_LOADER_OFFSET", fmt.Sprintf("%d", actualOffset))
+		scriptStr = replaceAll(scriptStr, "APE_LOADER_SIZE", fmt.Sprintf("%d", apeLoaderSize))
+		scriptBytes = []byte(scriptStr)
+	}
+
 	// Place script at offset 0x400
 	scriptOffset := 0x400
 	if len(scriptBytes) > apeHeaderSize-scriptOffset {
 		Exitf("APE shell script too large: %d bytes", len(scriptBytes))
 	}
 	copy(header[scriptOffset:], scriptBytes)
+
+	// Embed gzipped APE loader source for ARM64
+	if arch == sys.ARM64 && apeLoaderSize > 0 {
+		if apeLoaderOffset+apeLoaderSize > apeHeaderSize {
+			Exitf("APE loader too large to embed: %d bytes at offset %d", apeLoaderSize, apeLoaderOffset)
+		}
+		copy(header[apeLoaderOffset:], apeLoaderGz)
+	}
 
 	// === PE Header at offset 0x80 ===
 	// Required for Windows support
@@ -344,11 +400,15 @@ exit 1
 	}
 
 	// Pad remainder with newlines (safe for shell parsing)
-	// Start after the script ends, but skip the Mach-O header region
+	// Start after the script ends, but skip embedded data regions
 	scriptEnd := scriptOffset + len(scriptBytes)
 	for i := scriptEnd; i < apeHeaderSize; i++ {
 		// Don't overwrite the Mach-O header with newlines
 		if machoSize > 0 && i >= machoOffset && i < machoOffset+machoSize {
+			continue
+		}
+		// Don't overwrite the APE loader data with newlines
+		if apeLoaderSize > 0 && i >= apeLoaderOffset && i < apeLoaderOffset+apeLoaderSize {
 			continue
 		}
 		if header[i] == 0 {
@@ -557,4 +617,69 @@ func writePEHeader(header []byte, arch sys.ArchFamily) {
 	header[0x200] = 0x31 // xor eax, eax
 	header[0x201] = 0xC0
 	header[0x202] = 0xC3 // ret
+}
+
+// replaceAll is a simple string replacement helper
+func replaceAll(s, old, new string) string {
+	result := s
+	for {
+		i := indexOf(result, old)
+		if i < 0 {
+			break
+		}
+		result = result[:i] + new + result[i+len(old):]
+	}
+	return result
+}
+
+func indexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
+// getApeLoaderSource returns the gzipped APE loader C source for macOS ARM64.
+// The source is loaded from the cosmopolitan source tree if available.
+func getApeLoaderSource() []byte {
+	// Try to find ape-m1.c in common locations
+	paths := []string{
+		// Relative to GOROOT (this repo)
+		filepath.Join(os.Getenv("GOROOT"), "..", "cosmopolitan", "ape", "ape-m1.c"),
+		// User's repos directory
+		filepath.Join(os.Getenv("HOME"), "repos", "cosmopolitan", "ape", "ape-m1.c"),
+		// Environment variable override
+		os.Getenv("APE_LOADER_SOURCE"),
+	}
+
+	var sourceData []byte
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err == nil {
+			sourceData = data
+			break
+		}
+	}
+
+	if len(sourceData) == 0 {
+		// No source found - ARM64 macOS support will be limited
+		return nil
+	}
+
+	// Gzip compress the source
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(sourceData); err != nil {
+		return nil
+	}
+	if err := gz.Close(); err != nil {
+		return nil
+	}
+
+	return buf.Bytes()
 }

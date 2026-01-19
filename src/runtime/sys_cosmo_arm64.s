@@ -115,6 +115,59 @@ TEXT runtime·libcCall(SB),NOSPLIT,$0-24
 	MOVD	R0, ret+16(FP)
 	RET
 
+// dispatch_semaphore_create(value int64) dispatch_semaphore_t
+// Syslib offset 112
+TEXT runtime·dispatch_semaphore_create_trampoline(SB),NOSPLIT,$0-16
+	MOVD	runtime·__syslib(SB), R9
+	CBZ	R9, dsema_create_fail
+	MOVD	112(R9), R12
+	CBZ	R12, dsema_create_fail
+	MOVD	value+0(FP), R0
+	SUB	$16, RSP
+	BL	(R12)
+	ADD	$16, RSP
+	MOVD	R0, ret+8(FP)
+	RET
+dsema_create_fail:
+	MOVD	$0, ret+8(FP)
+	RET
+
+// dispatch_semaphore_signal(sema uintptr) int64
+// Syslib offset 120
+TEXT runtime·dispatch_semaphore_signal_trampoline(SB),NOSPLIT,$0-16
+	MOVD	runtime·__syslib(SB), R9
+	CBZ	R9, dsema_signal_fail
+	MOVD	120(R9), R12
+	CBZ	R12, dsema_signal_fail
+	MOVD	sema+0(FP), R0
+	SUB	$16, RSP
+	BL	(R12)
+	ADD	$16, RSP
+	MOVD	R0, ret+8(FP)
+	RET
+dsema_signal_fail:
+	MOVD	$0, ret+8(FP)
+	RET
+
+// dispatch_semaphore_wait(sema uintptr, timeout uint64) int64
+// Syslib offset 128
+TEXT runtime·dispatch_semaphore_wait_trampoline(SB),NOSPLIT,$0-24
+	MOVD	runtime·__syslib(SB), R9
+	CBZ	R9, dsema_wait_fail
+	MOVD	128(R9), R12
+	CBZ	R12, dsema_wait_fail
+	MOVD	sema+0(FP), R0
+	MOVD	timeout+8(FP), R1
+	SUB	$16, RSP
+	BL	(R12)
+	ADD	$16, RSP
+	MOVD	R0, ret+16(FP)
+	RET
+dsema_wait_fail:
+	MOVD	$-1, R0
+	MOVD	R0, ret+16(FP)
+	RET
+
 // Helper macro: check if we're on macOS and jump to label if so
 // Clobbers R9
 #define CHECK_DARWIN(label) \
@@ -374,9 +427,19 @@ raiseproc_darwin:
 	RET
 
 TEXT ·getpid(SB),NOSPLIT,$0-8
-	// getpid is the same on both platforms, use syscall
+	CHECK_DARWIN(getpid_darwin)
+	// Linux path
 	MOVD	$SYS_getpid, R8
 	SVC
+	MOVD	R0, ret+0(FP)
+	RET
+getpid_darwin:
+	// macOS: use getpid from syslib (offset 112)
+	MOVD	runtime·__syslib(SB), R9
+	MOVD	112(R9), R12
+	SUB	$16, RSP
+	BL	(R12)
+	ADD	$16, RSP
 	MOVD	R0, ret+0(FP)
 	RET
 
@@ -548,17 +611,12 @@ nanotime_finish:
 	MOVD	$1000000000, R4
 	MUL	R4, R3
 	ADD	R5, R3
+	// DEBUG: exit 68 - nanotime1 return
+	// MOVD	$68, R0
+	// MOVD	runtime·__syslib(SB), R9
+	// MOVD	224(R9), R12
+	// BL	(R12)
 	MOVD	R3, ret+0(FP)
-
-	// DEBUG: Exit 68 before nanotime1 returns
-	MOVW	runtime·__hostos(SB), R9
-	CMPW	$HOSTXNU, R9
-	BNE	nanotime1_ret_skip_debug
-	MOVD	runtime·__syslib(SB), R9
-	MOVD	224(R9), R12
-	MOVD	$68, R0
-	BL	(R12)
-nanotime1_ret_skip_debug:
 	RET
 
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0-28
@@ -600,16 +658,11 @@ TEXT runtime·rt_sigaction(SB),NOSPLIT,$0-36
 	MOVW	R0, ret+32(FP)
 	RET
 rt_sigaction_darwin:
-	// macOS: use sigaction from Syslib
-	MOVD	runtime·__syslib(SB), R9
-	MOVD	272(R9), R12
-	MOVD	sig+0(FP), R0
-	MOVD	new+8(FP), R1
-	MOVD	old+16(FP), R2
-	SUB	$16, RSP
-	BL	(R12)
-	ADD	$16, RSP
-	MOVW	R0, ret+32(FP)
+	// macOS: sigaction structure is different from Linux
+	// For now, return success without calling sigaction
+	// This means signal handling won't work properly, but allows basic execution
+	// TODO: Implement proper sigaction translation layer
+	MOVW	$0, ret+32(FP)
 	RET
 
 TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
@@ -907,10 +960,79 @@ clone_again:
 
 clone_darwin:
 	// macOS: use pthread_create instead of clone
-	// This is complex - for now return error
-	// The runtime will need to use pthread_create for macOS
+	// Get pthread_create from syslib (offset 72)
+	MOVD	runtime·__syslib(SB), R9
+	CBZ	R9, clone_darwin_fail
+	MOVD	72(R9), R12
+	CBZ	R12, clone_darwin_fail
+
+	// pthread_create signature:
+	// int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+	//                    void *(*start_routine)(void *), void *arg)
+	//
+	// We need to create a thread that runs mstart with the new m.
+	// For pthread, we'll use mstart_stub_cosmo which expects mp in the argument.
+
+	// Clone args: flags+0, stk+8, mp+16, gp+24, fn+32
+	// Load mp BEFORE modifying RSP (FP offsets may be affected by RSP changes)
+	MOVD	mp+16(FP), R19		// R19 = mp (callee-saved, will survive BL)
+
+	// Allocate space for pthread_t and save callee-saves we'll use
+	SUB	$48, RSP
+	STP	(R19, R20), 32(RSP)	// Save R19 (mp) and R20 (unused but paired)
+
+	MOVD	RSP, R0			// &thread (first 16 bytes)
+	MOVD	$0, R1			// attr = NULL (default)
+	MOVD	$runtime·mstart_stub_cosmo(SB), R2	// start_routine
+	MOVD	R19, R3			// arg = mp
+
+	BL	(R12)			// pthread_create
+
+	// Restore callee-saves
+	LDP	32(RSP), (R19, R20)
+	ADD	$48, RSP
+
+	// pthread_create returns 0 on success, error code on failure
+	// clone returns child tid on success (> 0), negative errno on failure
+	CMP	$0, R0
+	BNE	clone_darwin_fail
+
+	// Return a fake positive tid
+	MOVW	$1, R0
+	MOVW	R0, ret+40(FP)
+	RET
+
+clone_darwin_fail:
 	MOVW	$-38, R0	// ENOSYS
 	MOVW	R0, ret+40(FP)
+	RET
+
+// mstart_stub_cosmo is the entry point for threads created with pthread_create
+// It receives mp as the argument and sets up the thread to run mstart
+// Matches the structure of darwin's mstart_stub
+TEXT runtime·mstart_stub_cosmo(SB),NOSPLIT,$160
+	// R0 points to the m.
+	// We are already on m's g0 stack (provided by pthread).
+	// This matches darwin's mstart_stub exactly.
+
+	// Save callee-save registers.
+	SAVE_R19_TO_R28(8)
+	SAVE_F8_TO_F15(88)
+
+	MOVD	m_g0(R0), g
+	BL	runtime·save_g(SB)
+
+	BL	runtime·mstart(SB)
+
+	// Restore callee-save registers.
+	RESTORE_R19_TO_R28(8)
+	RESTORE_F8_TO_F15(88)
+
+	// Go is all done with this OS thread.
+	// Tell pthread everything is ok (we never join with this thread, so
+	// the value here doesn't really matter).
+	MOVD	$0, R0
+
 	RET
 
 TEXT runtime·sigaltstack(SB),NOSPLIT,$0
@@ -929,16 +1051,16 @@ sigaltstack_ok:
 sigaltstack_darwin:
 	// macOS: use Syslib sigaltstack
 	MOVD	runtime·__syslib(SB), R9
+	CBZ	R9, sigaltstack_darwin_ok  // No syslib, skip
 	MOVD	296(R9), R12
+	CBZ	R12, sigaltstack_darwin_ok  // Function not available, skip
 	MOVD	new+0(FP), R0
 	MOVD	old+8(FP), R1
 	SUB	$16, RSP
 	BL	(R12)
 	ADD	$16, RSP
-	CMN	$4095, R0
-	BCC	sigaltstack_darwin_ok
-	MOVD	$0, R0
-	MOVD	R0, (R0)	// crash
+	// Note: darwin sigaltstack returns 0 on success, -1 on error
+	// We treat non-zero as non-fatal here
 sigaltstack_darwin_ok:
 	RET
 

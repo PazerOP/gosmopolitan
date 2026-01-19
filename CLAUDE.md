@@ -150,3 +150,21 @@ When adding cosmo to an existing `//go:build` constraint, use alphabetical order
 ```
 
 For filename-based constraints, create new files rather than modifying the build system.
+
+## Debugging ARM64 Cosmo
+
+**Keep `DEBUGGING.md` updated** when working on ARM64 cosmo support. Log:
+- What you've tried (with debug exit codes used)
+- What worked vs what failed
+- Current hypothesis and next steps
+
+This prevents going in circles and losing context across sessions.
+
+## APE Binary Reference
+
+**GOAL: Make our APE binaries work exactly like `~/Downloads/vim.com`**
+
+The vim.com binary is a working APE that runs on macOS ARM64. When fixing APE generation:
+1. Compare our output to vim.com's shell header structure
+2. Match vim.com's macOS ARM64 handling (embedded APE loader, cc compilation)
+3. Don't invent new approaches - copy what works in vim.com
